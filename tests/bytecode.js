@@ -2,11 +2,14 @@
 // Shared cairn bytecode tooling (v0.1): used by vm_test.js and fixture_check.js.
 const OPCODES = { PUSH_STR:1, PUSH_SELECTOR:2, GET_NODES:3, ADD_CLASS:4, REMOVE_CLASS:5,
   TOGGLE_CLASS:6, SET_TEXT:7, ON_EVENT:8, JUMP:9, HALT:10, EXTRACT_TEXT:11, PUSH_VAR:12,
-  CMP_STR:13, JMP_IF_FALSE:14 };
+  CMP_STR:13, JMP_IF_FALSE:14,
+  STORE_VAR:15, INC:16, ADD_NUM:17, SUB_NUM:18, CMP_EQ:19, CMP_NE:20,
+  CMP_LT:21, CMP_GT:22, CMP_LE:23, CMP_GE:24, JMP_IF_TRUE:25, SET_TEXT_POP:26,
+  EXTRACT_VALUE:27 };
 const NAMES = {};
 for (const k in OPCODES) NAMES[OPCODES[k]] = k;
 const PAYLOAD = { 1:"str", 2:"str", 4:"str", 5:"str", 6:"str", 7:"str", 8:"str+addr",
-  9:"addr", 11:"str", 12:"str", 14:"addr" };
+  9:"addr", 11:"str", 12:"str", 14:"addr", 15:"str", 16:"str", 25:"addr", 27:"str" };
 
 function strAt(bytes, i) {
   if (i + 2 > bytes.length) throw new Error("truncated bytecode @" + i);

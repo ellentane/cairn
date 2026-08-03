@@ -4,9 +4,25 @@ const path = require("path");
 const bc = require("./bytecode.js");
 
 // Per-version opcode allowlists (§5.1 `since` column as data).
-const ALLOWED = { "v0.1": new Set([1,2,3,4,5,6,7,8,9,10,11,12,13,14]) };
+const VERSIONS = {
+  "v0.1": new Set([1,2,3,4,5,6,7,8,9,10,11,12,13,14]),
+  "v0.2": new Set([1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27]),
+};
+const version = process.argv[3] || "v0.1";
+const allowed = VERSIONS[version];
+if (!allowed) { console.error("unknown version " + version); process.exit(2); }
 
-const dir = path.join(__dirname, "fixtures", "v0.1");
+const dir = path.join(__dirname, "fixtures", version);
+
+function extractDslFromMd(mdPath) {
+  const text = fs.readFileSync(mdPath, "utf8");
+  const m = /```cairn\n([\s\S]*?)\n```/.exec(text);
+  if (!m) throw new Error("no cairn block in " + mdPath);
+  return m[1];
+}
+function compactJson(obj) {
+  return "{" + Object.keys(obj).map((k) => JSON.stringify(k) + ": " + JSON.stringify(obj[k])).join(", ") + "}";
+}
 let failures = 0;
 for (const f of fs.readdirSync(dir).filter((x) => x.endsWith(".bin")).sort()) {
   const name = f.replace(/\.bin$/, "");
@@ -22,6 +38,15 @@ for (const f of fs.readdirSync(dir).filter((x) => x.endsWith(".bin")).sort()) {
   }
   // 1. instruction listing must match expected
   const got = ins.map((x) => ({ pos: x.pos, name: x.name, ...(x.s !== undefined ? { s: x.s } : {}), ...(x.addr !== undefined ? { addr: x.addr } : {}) }));
+  const len = bin.length;
+  if (process.argv[2] === "--update") {
+    const dsl = extractDslFromMd(path.join(dir, name + ".md"));
+    const out = "{\n  \"dsl\": " + JSON.stringify(dsl) + ",\n  \"instructions\": [\n" +
+      got.map((x) => "    " + compactJson(x)).join(",\n") + "\n  ],\n  \"len\": " + len + "\n}\n";
+    fs.writeFileSync(path.join(dir, name + ".expected.json"), out);
+    console.log(`UPDATED ${name}`);
+    continue;
+  }
   if (JSON.stringify(got) !== JSON.stringify(expected.instructions)) {
     console.error(`FAIL ${name}: listing mismatch`);
     console.error("  got:      " + JSON.stringify(got));
@@ -44,7 +69,6 @@ for (const f of fs.readdirSync(dir).filter((x) => x.endsWith(".bin")).sort()) {
   }
   // 2. structural checks
   const boundaries = new Set(ins.map((x) => x.pos));
-  const len = bin.length;
   const halt = ins.find((x) => x.name === "HALT");
   if (!halt) { console.error(`FAIL ${name}: no HALT`); ok = false; }
   for (const it of ins) {
@@ -54,7 +78,7 @@ for (const f of fs.readdirSync(dir).filter((x) => x.endsWith(".bin")).sort()) {
       if (!boundaries.has(it.addr)) { console.error(`FAIL ${name}: ${it.name}@${it.pos} addr ${it.addr} not on boundary`); ok = false; }
       if ((it.name === "ON_EVENT" || it.name === "JUMP" || it.name === "JMP_IF_FALSE") && it.addr <= halt.pos) { console.error(`FAIL ${name}: ${it.name} addr in prologue`); ok = false; }
     }
-    if (!ALLOWED["v0.1"].has(it.op)) { console.error(`FAIL ${name}: opcode 0x${it.op.toString(16)} not allowed in v0.1`); ok = false; }
+    if (!allowed.has(it.op)) { console.error(`FAIL ${name}: opcode 0x${it.op.toString(16)} not allowed in ${version}`); ok = false; }
   }
   if (ok) console.log(`PASS ${name}: ${len} bytes, ${ins.length} instructions`);
   else failures++;
