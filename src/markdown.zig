@@ -199,7 +199,7 @@ pub fn renderAll(allocator: std.mem.Allocator, src: []const u8) MarkdownError!Re
             try p.handleFence(line, line_no, &lines);
             continue;
         }
-        if (line.len > 0 and line[0] == '#' and line.len > 1 and line[1] == ' ') {
+        if (line.len > 0 and line[0] == '#' and line.len > 1 and (line[1] == ' ' or line[1] == '#')) {
             try p.flushPara();
             try p.flushList();
             var level: usize = 1;
@@ -292,4 +292,10 @@ test "second cairn block is an error" {
 test "title falls back to raw h1 html" {
     const r = try renderWith("<h1 class=\"x\">Raw</h1>\n");
     try expectEqualStrings("Raw", r.title.?);
+}
+
+test "h2 through h6 headings" {
+    const r = try renderWith("## sub\n\n### mid\n\n###### six\n");
+    try expectEqualStrings("<h2>sub</h2>\n<h3>mid</h3>\n<h6>six</h6>\n", r.html);
+    try expectEqual(@as(?[]const u8, null), r.title); // h1 only sets title
 }
