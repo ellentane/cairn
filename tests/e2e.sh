@@ -19,6 +19,9 @@ node tests/fixture_check.js v0.2
 echo "== VM behavior suite =="
 node tests/vm_test.js
 
+echo "== minified VM behavior =="
+node tests/vm_test.js --vm-file src/vm.min.js
+
 echo "== build example =="
 ./zig-out/bin/cairn build example/index.md >/dev/null 2> /tmp/opencode/cairn-report.txt
 cat /tmp/opencode/cairn-report.txt

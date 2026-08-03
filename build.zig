@@ -24,4 +24,8 @@ pub fn build(b: *std.Build) void {
     const run_tests = b.addRunArtifact(tests);
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&run_tests.step);
+
+    const minify = b.addSystemCommand(&.{ "node", "tools/minify_vm.js" });
+    const minify_step = b.step("minify", "Regenerate src/vm.min.js from src/vm.js");
+    minify_step.dependOn(&minify.step);
 }
