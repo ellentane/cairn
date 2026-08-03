@@ -9,21 +9,59 @@ pub const DomOp = struct {
     selector: []const u8,
 };
 
-pub const ExtractOp = struct {
-    selector: []const u8,
-    var_name: []const u8,
+pub const BinOp = enum { add, sub };
+
+pub const Expr = union(enum) {
+    lit: []const u8, // string or number literal (values are strings)
+    var_ref: []const u8,
+    binary: struct {
+        op: BinOp,
+        lhs: *Expr,
+        rhs: *Expr,
+    },
 };
 
-pub const IfStmt = struct {
+pub const CmpOp = enum { eq, ne, lt, gt, le, ge };
+
+pub const Cond = struct {
     var_name: []const u8,
-    value: []const u8,
+    op: CmpOp,
+    rhs: Expr,
+};
+
+pub const ExtractOp = struct { selector: []const u8, var_name: []const u8 };
+pub const IncStmt = []const u8; // var name
+pub const SetTextExpr = struct { expr: Expr, selector: []const u8 };
+
+pub const IfStmt = struct {
+    cond: Cond,
+    body: []Action,
+    else_body: ?[]Action,
+};
+
+pub const WhileStmt = struct {
+    cond: Cond,
     body: []Action,
 };
 
 pub const Action = union(enum) {
     dom: DomOp,
+    set_text_expr: SetTextExpr,
     extract: ExtractOp,
+    extract_value: ExtractOp,
     if_stmt: IfStmt,
+    while_stmt: WhileStmt,
+    inc_stmt: IncStmt,
+};
+
+pub const Assignment = struct {
+    var_name: []const u8,
+    expr: Expr,
+};
+
+pub const Statement = union(enum) {
+    binding: Binding,
+    assignment: Assignment,
 };
 
 pub const Binding = struct {
@@ -33,7 +71,7 @@ pub const Binding = struct {
 };
 
 pub const Program = struct {
-    bindings: []Binding,
+    statements: []Statement,
 };
 
 pub const Diagnostic = struct {
@@ -48,18 +86,18 @@ pub const ParseError = error{
     ExpectedLBrace,
     ExpectedRBrace,
     ExpectedEqEq,
+    ExpectedEquals,
     UnknownKeyword,
     UnterminatedString,
     InvalidCharacter,
     OutOfMemory,
 };
 
-const events = [_][]const u8{ "click", "hover", "input", "load" };
+const events = [_][]const u8{ "click", "hover", "input", "load", "focus", "blur", "keydown", "keyup", "change", "submit", "dblclick" };
 const dom_kinds = [_]struct { name: []const u8, kind: DomKind }{
     .{ .name = "add_class", .kind = .add_class },
     .{ .name = "remove_class", .kind = .remove_class },
     .{ .name = "toggle_class", .kind = .toggle_class },
-    .{ .name = "set_text", .kind = .set_text },
 };
 
 fn isEvent(name: []const u8) bool {
@@ -128,6 +166,14 @@ fn expectKeywordTok(allocator: std.mem.Allocator, lex: *lexer.Lexer, diag: *?Dia
     return allocator.dupe(u8, tok.text);
 }
 
+fn expectEquals(lex: *lexer.Lexer, diag: *?Diagnostic) ParseError!void {
+    const tok = try nextTok(lex, diag);
+    if (tok.type != .equals) {
+        setDiag(diag, tok.line, tok.col, "expected `=`");
+        return error.ExpectedEquals;
+    }
+}
+
 fn expectEqEq(lex: *lexer.Lexer, diag: *?Diagnostic) ParseError!void {
     const tok = try nextTok(lex, diag);
     if (tok.type != .eqeq) {
@@ -152,21 +198,101 @@ fn unescape(allocator: std.mem.Allocator, raw: []const u8) ![]u8 {
     return out.toOwnedSlice(allocator);
 }
 
-fn appendAction(allocator: std.mem.Allocator, list: *std.ArrayList(Action), tok: lexer.Token, lex: *lexer.Lexer, diag: *?Diagnostic) ParseError!void {
-    if (std.mem.eql(u8, tok.text, "if")) {
-        const vn = try expectKeywordTok(allocator, lex, diag);
-        try expectEqEq(lex, diag);
-        const val = try expectString(allocator, lex, diag);
-        try expectLBrace(lex, diag);
-        const body = try parseActionBlock(allocator, lex, diag);
-        try list.append(allocator, .{ .if_stmt = .{ .var_name = vn, .value = val, .body = body } });
-        return;
+fn parseTerm(allocator: std.mem.Allocator, lex: *lexer.Lexer, diag: *?Diagnostic) ParseError!Expr {
+    const tok = try nextTok(lex, diag);
+    switch (tok.type) {
+        .string => return .{ .lit = try unescape(allocator, tok.text) },
+        .number => return .{ .lit = try allocator.dupe(u8, tok.text) },
+        .keyword => return .{ .var_ref = try allocator.dupe(u8, tok.text) },
+        else => {
+            setDiag(diag, tok.line, tok.col, "expected a value");
+            return error.ExpectedString;
+        },
     }
-    if (std.mem.eql(u8, tok.text, "extract_text")) {
+}
+
+fn parseExpr(allocator: std.mem.Allocator, lex: *lexer.Lexer, diag: *?Diagnostic) ParseError!Expr {
+    var lhs = try parseTerm(allocator, lex, diag);
+    while (true) {
+        const tok = try nextTok(lex, diag);
+        const op: BinOp = switch (tok.type) {
+            .plus => .add,
+            .minus => .sub,
+            else => {
+                lex.pushback = tok; // one-token lookahead
+                return lhs;
+            },
+        };
+        const rhs = try parseTerm(allocator, lex, diag);
+        const boxed_lhs = try allocator.create(Expr);
+        boxed_lhs.* = lhs;
+        const boxed_rhs = try allocator.create(Expr);
+        boxed_rhs.* = rhs;
+        lhs = .{ .binary = .{ .op = op, .lhs = boxed_lhs, .rhs = boxed_rhs } };
+    }
+}
+
+fn parseCond(allocator: std.mem.Allocator, lex: *lexer.Lexer, diag: *?Diagnostic) ParseError!Cond {
+    const vn = try expectKeywordTok(allocator, lex, diag);
+    const tok = try nextTok(lex, diag);
+    const op: CmpOp = switch (tok.type) {
+        .eqeq => .eq,
+        .neq => .ne,
+        .lt => .lt,
+        .gt => .gt,
+        .le => .le,
+        .ge => .ge,
+        else => {
+            setDiag(diag, tok.line, tok.col, "expected a comparison operator");
+            return error.ExpectedEqEq;
+        },
+    };
+    return .{ .var_name = vn, .op = op, .rhs = try parseTerm(allocator, lex, diag) };
+}
+
+fn appendAction(allocator: std.mem.Allocator, list: *std.ArrayList(Action), tok: lexer.Token, lex: *lexer.Lexer, diag: *?Diagnostic) ParseError!void {
+    if (std.mem.eql(u8, tok.text, "extract_text") or std.mem.eql(u8, tok.text, "extract_value")) {
         const sel = try expectString(allocator, lex, diag);
         try expectKeyword(lex, "to", diag);
         const vn = try expectKeywordTok(allocator, lex, diag);
-        try list.append(allocator, .{ .extract = .{ .selector = sel, .var_name = vn } });
+        try list.append(allocator, if (std.mem.eql(u8, tok.text, "extract_value"))
+            .{ .extract_value = .{ .selector = sel, .var_name = vn } }
+        else
+            .{ .extract = .{ .selector = sel, .var_name = vn } });
+        return;
+    }
+    if (std.mem.eql(u8, tok.text, "inc")) {
+        const vn = try expectKeywordTok(allocator, lex, diag);
+        try list.append(allocator, .{ .inc_stmt = vn });
+        return;
+    }
+    if (std.mem.eql(u8, tok.text, "if")) {
+        const cond = try parseCond(allocator, lex, diag);
+        try expectLBrace(lex, diag);
+        const body = try parseActionBlock(allocator, lex, diag);
+        var else_body: ?[]Action = null;
+        const t = try nextTok(lex, diag);
+        if (t.type == .keyword and std.mem.eql(u8, t.text, "else")) {
+            try expectLBrace(lex, diag);
+            else_body = try parseActionBlock(allocator, lex, diag);
+        } else {
+            lex.pushback = t;
+        }
+        try list.append(allocator, .{ .if_stmt = .{ .cond = cond, .body = body, .else_body = else_body } });
+        return;
+    }
+    if (std.mem.eql(u8, tok.text, "while")) {
+        const cond = try parseCond(allocator, lex, diag);
+        try expectLBrace(lex, diag);
+        const body = try parseActionBlock(allocator, lex, diag);
+        try list.append(allocator, .{ .while_stmt = .{ .cond = cond, .body = body } });
+        return;
+    }
+    if (std.mem.eql(u8, tok.text, "set_text")) {
+        const expr = try parseExpr(allocator, lex, diag);
+        try expectKeyword(lex, "on", diag);
+        const sel = try expectString(allocator, lex, diag);
+        try list.append(allocator, .{ .set_text_expr = .{ .expr = expr, .selector = sel } });
         return;
     }
     const kind = domKind(tok.text) orelse return failTok(diag, tok, error.UnknownKeyword, "unknown action");
@@ -192,32 +318,36 @@ fn parseActionBlock(allocator: std.mem.Allocator, lex: *lexer.Lexer, diag: *?Dia
     }
 }
 
-/// The allocator is expected to be an arena (or other leak-tolerant
-/// allocator): on error, AST slices allocated before the failing token
-/// are not freed (only the bindings buffer is errdefer'd); on success,
-/// all AST memory is owned by the caller's allocator.
 pub fn parse(allocator: std.mem.Allocator, src: []const u8, diag: *?Diagnostic) ParseError!Program {
     var lex = lexer.Lexer{ .src = src };
-    var bindings: std.ArrayList(Binding) = .empty;
-    errdefer bindings.deinit(allocator);
+    var statements: std.ArrayList(Statement) = .empty;
+    errdefer statements.deinit(allocator);
 
     while (true) {
         const tok = try nextTok(&lex, diag);
         if (tok.type == .eof) break;
         if (tok.type == .semicolon) continue;
-        if (tok.type != .keyword) return failTok(diag, tok, error.ExpectedKeyword, "expected `on`");
+        if (tok.type != .keyword) return failTok(diag, tok, error.ExpectedKeyword, "expected statement");
+        if (std.mem.eql(u8, tok.text, "let")) {
+            const vn = try expectKeywordTok(allocator, &lex, diag);
+            try expectEquals(&lex, diag);
+            const expr = try parseExpr(allocator, &lex, diag);
+            try statements.append(allocator, .{ .assignment = .{ .var_name = vn, .expr = expr } });
+            continue;
+        }
         if (!std.mem.eql(u8, tok.text, "on")) return failTok(diag, tok, error.ExpectedKeyword, "expected `on`");
         const ev_tok = try nextTok(&lex, diag);
         if (ev_tok.type != .keyword or !isEvent(ev_tok.text)) {
-            return failTok(diag, ev_tok, error.UnknownKeyword, "unknown event type");
+            setDiag(diag, ev_tok.line, ev_tok.col, "unknown event type");
+            return error.UnknownKeyword;
         }
         const event = try allocator.dupe(u8, ev_tok.text);
         const sel = try expectString(allocator, &lex, diag);
         try expectLBrace(&lex, diag);
         const body = try parseActionBlock(allocator, &lex, diag);
-        try bindings.append(allocator, .{ .event = event, .selector = sel, .body = body });
+        try statements.append(allocator, .{ .binding = .{ .event = event, .selector = sel, .body = body } });
     }
-    return .{ .bindings = try bindings.toOwnedSlice(allocator) };
+    return .{ .statements = try statements.toOwnedSlice(allocator) };
 }
 
 const parser = @import("parser.zig");
@@ -227,50 +357,111 @@ const expectError = std.testing.expectError;
 const expectEqualStrings = std.testing.expectEqualStrings;
 
 fn parseWith(src: []const u8) !parser.Program {
-    // arena is intentionally leaked (page_allocator: no leak detection);
-    // deinit here would free the returned AST before the test reads it
+    // leaked-arena pattern (page_allocator, no deinit) — see v0.1 plan Task 2
     var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     var diag: ?parser.Diagnostic = null;
     return parser.parse(arena.allocator(), src, &diag);
 }
 
+fn bindingOf(p: parser.Program, i: usize) parser.Binding {
+    return p.statements[i].binding;
+}
+
+test "top-level let assignment and inc" {
+    const prog = try parseWith("let c = 0; on click \"#b\" { inc c; }");
+    try expectEqual(@as(usize, 2), prog.statements.len);
+    try expect(std.meta.activeTag(prog.statements[0]) == .assignment);
+    try expectEqualStrings("c", prog.statements[0].assignment.var_name);
+    try expect(std.meta.activeTag(prog.statements[1]) == .binding);
+    const body = prog.statements[1].binding.body;
+    try expect(std.meta.activeTag(body[0]) == .inc_stmt);
+    try expectEqualStrings("c", body[0].inc_stmt);
+}
+
+test "expression with add and subtract" {
+    const prog = try parseWith("let v = 1 + count - 2;");
+    const e = prog.statements[0].assignment.expr;
+    try expect(std.meta.activeTag(e) == .binary);
+    try expectEqual(e.binary.op, .sub);
+    try expect(std.meta.activeTag(e.binary.rhs.*) == .lit);
+    try expectEqualStrings("2", e.binary.rhs.*.lit);
+    const inner = e.binary.lhs.*;
+    try expectEqual(inner.binary.op, .add);
+    try expect(std.meta.activeTag(inner.binary.rhs.*) == .var_ref);
+    try expectEqualStrings("count", inner.binary.rhs.*.var_ref);
+}
+
+test "if with else and while" {
+    const prog = try parseWith("on click \"#b\" { if c == \"1\" { inc c; } else { inc c; } while c < 3 { inc c; } }");
+    const body = prog.statements[0].binding.body;
+    try expectEqual(@as(usize, 2), body.len);
+    try expect(std.meta.activeTag(body[0]) == .if_stmt);
+    try expect(body[0].if_stmt.else_body != null);
+    try expectEqual(@as(usize, 1), body[0].if_stmt.else_body.?.len);
+    try expect(std.meta.activeTag(body[1]) == .while_stmt);
+    try expectEqual(body[1].while_stmt.cond.op, .lt);
+}
+
+test "set_text with expression and extract_value" {
+    const prog = try parseWith("on click \"#b\" { set_text count + 1 on \"#o\"; extract_value \"#i\" to v; }");
+    const body = prog.statements[0].binding.body;
+    try expect(std.meta.activeTag(body[0]) == .set_text_expr);
+    try expectEqualStrings("#o", body[0].set_text_expr.selector);
+    try expect(std.meta.activeTag(body[0].set_text_expr.expr) == .binary);
+    try expect(std.meta.activeTag(body[1]) == .extract_value);
+    try expectEqualStrings("v", body[1].extract_value.var_name);
+}
+
+test "expanded event types parse" {
+    const prog = try parseWith("on keydown \"#i\" { } on submit \"#f\" { }");
+    try expectEqualStrings("keydown", prog.statements[0].binding.event);
+    try expectEqualStrings("submit", prog.statements[1].binding.event);
+}
+
+test "number literal and var operands in cond" {
+    const prog = try parseWith("on load \"#w\" { while n < limit { inc n; } }");
+    const cond = prog.statements[0].binding.body[0].while_stmt.cond;
+    try expect(std.meta.activeTag(cond.rhs) == .var_ref);
+    try expectEqualStrings("limit", cond.rhs.var_ref);
+}
+
 test "parses event binding with set_text" {
     const prog = try parseWith("on click \"#b\" { set_text \"hello\" on \"#o\"; }");
-    try expectEqual(@as(usize, 1), prog.bindings.len);
-    const b = prog.bindings[0];
+    try expectEqual(@as(usize, 1), prog.statements.len);
+    const b = bindingOf(prog, 0);
     try expectEqualStrings("click", b.event);
     try expectEqualStrings("#b", b.selector);
     try expectEqual(@as(usize, 1), b.body.len);
     const act = b.body[0];
-    try expect(std.meta.activeTag(act) == .dom);
-    try expectEqual(act.dom.kind, .set_text);
-    try expectEqualStrings("hello", act.dom.class);
-    try expectEqualStrings("#o", act.dom.selector);
+    try expect(std.meta.activeTag(act) == .set_text_expr);
+    try expect(std.meta.activeTag(act.set_text_expr.expr) == .lit);
+    try expectEqualStrings("hello", act.set_text_expr.expr.lit);
+    try expectEqualStrings("#o", act.set_text_expr.selector);
 }
 
 test "parses extract_text and if" {
     const prog = try parseWith("on click \"#g\" { extract_text \"#s\" to v; if v == \"yes\" { set_text \"hit\" on \"#d\"; } }");
-    const body = prog.bindings[0].body;
+    const body = bindingOf(prog, 0).body;
     try expectEqual(@as(usize, 2), body.len);
     try expect(std.meta.activeTag(body[0]) == .extract);
     try expectEqualStrings("#s", body[0].extract.selector);
     try expectEqualStrings("v", body[0].extract.var_name);
     try expect(std.meta.activeTag(body[1]) == .if_stmt);
-    try expectEqualStrings("v", body[1].if_stmt.var_name);
-    try expectEqualStrings("yes", body[1].if_stmt.value);
+    try expectEqualStrings("v", body[1].if_stmt.cond.var_name);
+    try expectEqualStrings("yes", body[1].if_stmt.cond.rhs.lit);
     try expectEqual(@as(usize, 1), body[1].if_stmt.body.len);
 }
 
 test "parses multiple bindings with semicolons" {
     const prog = try parseWith("on hover \"#a\" { add_class \"k\" on \"#a\"; }; on load \"#b\" { toggle_class \"on\" on \"#b\" }");
-    try expectEqual(@as(usize, 2), prog.bindings.len);
-    try expectEqualStrings("hover", prog.bindings[0].event);
-    try expectEqualStrings("load", prog.bindings[1].event);
+    try expectEqual(@as(usize, 2), prog.statements.len);
+    try expectEqualStrings("hover", bindingOf(prog, 0).event);
+    try expectEqualStrings("load", bindingOf(prog, 1).event);
 }
 
 test "string escapes are unescaped" {
     const prog = try parseWith("on click \"#b\" { set_text \"a\\\"b\" on \"#o\"; }");
-    try expectEqualStrings("a\"b", prog.bindings[0].body[0].dom.class);
+    try expectEqualStrings("a\"b", bindingOf(prog, 0).body[0].set_text_expr.expr.lit);
 }
 
 test "missing brace is a parse error with diagnostic" {
@@ -288,7 +479,7 @@ test "unknown action keyword is rejected" {
 test "unknown event type is rejected" {
     var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     var diag: ?parser.Diagnostic = null;
-    try expectError(error.UnknownKeyword, parser.parse(arena.allocator(), "on dblclick \"#b\" { }", &diag));
+    try expectError(error.UnknownKeyword, parser.parse(arena.allocator(), "on keypress \"#b\" { }", &diag));
     try expect(diag != null);
     try expectEqual(@as(u32, 1), diag.?.line);
 }
@@ -300,9 +491,9 @@ test "top-level non-on keyword is rejected" {
     try expect(diag != null);
 }
 
-test "empty program has zero bindings" {
+test "empty program has zero statements" {
     const prog = try parseWith("");
-    try expectEqual(@as(usize, 0), prog.bindings.len);
+    try expectEqual(@as(usize, 0), prog.statements.len);
 }
 
 test "event-name slot with a string is rejected" {
