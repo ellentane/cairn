@@ -18,6 +18,7 @@ function cairnBoot(bytes, doc) {
   }
 
   function u16() { var v = B[ip] | (B[ip + 1] << 8); ip += 2; return v; }
+  function top() { return S[S.length - 1]; }
   function str() {
     var n = u16();
     var s = new TextDecoder().decode(B.subarray(ip, ip + n));
@@ -43,9 +44,9 @@ function cairnBoot(bytes, doc) {
           case 1: S.push(str()); break;                              // PUSH_STR
           case 2: S.push(str()); break;                              // PUSH_SELECTOR
           case 3: S.push(doc.querySelectorAll(S.pop())); break;      // GET_NODES
-          case 4: addClass(S.pop(), str()); break;                   // ADD_CLASS
-          case 5: removeClass(S.pop(), str()); break;                // REMOVE_CLASS
-          case 6: toggleClass(S.pop(), str()); break;                // TOGGLE_CLASS
+          case 4: addClass(top(), str()); break;                   // ADD_CLASS (leaves nodes on stack)
+          case 5: removeClass(top(), str()); break;                // REMOVE_CLASS (leaves nodes on stack)
+          case 6: toggleClass(top(), str()); break;                // TOGGLE_CLASS (leaves nodes on stack)
           case 7: setText(S.pop(), str()); break;                    // SET_TEXT
           case 8: bindEvent(S.pop(), str(), u16()); break;           // ON_EVENT
           case 9: ip = u16(); break;                                 // JUMP
