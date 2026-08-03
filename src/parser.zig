@@ -76,9 +76,9 @@ fn setDiag(diag: *?Diagnostic, line: u32, col: u32, msg: []const u8) void {
     diag.* = .{ .line = line, .col = col, .msg = msg };
 }
 
-fn failTok(diag: *?Diagnostic, tok: lexer.Token, comptime msg: []const u8) ParseError {
+fn failTok(diag: *?Diagnostic, tok: lexer.Token, err: ParseError, comptime msg: []const u8) ParseError {
     setDiag(diag, tok.line, tok.col, msg);
-    return error.UnknownKeyword;
+    return err;
 }
 
 fn nextTok(lex: *lexer.Lexer, diag: *?Diagnostic) ParseError!lexer.Token {
@@ -169,7 +169,7 @@ fn appendAction(allocator: std.mem.Allocator, list: *std.ArrayList(Action), tok:
         try list.append(allocator, .{ .extract = .{ .selector = sel, .var_name = vn } });
         return;
     }
-    const kind = domKind(tok.text) orelse return failTok(diag, tok, "unknown action");
+    const kind = domKind(tok.text) orelse return failTok(diag, tok, error.UnknownKeyword, "unknown action");
     const class = try expectString(allocator, lex, diag);
     try expectKeyword(lex, "on", diag);
     const sel = try expectString(allocator, lex, diag);
@@ -187,11 +187,15 @@ fn parseActionBlock(allocator: std.mem.Allocator, lex: *lexer.Lexer, diag: *?Dia
             setDiag(diag, t.line, t.col, "missing `}`");
             return error.ExpectedRBrace;
         }
-        if (t.type != .keyword) return failTok(diag, t, "expected action");
+        if (t.type != .keyword) return failTok(diag, t, error.ExpectedKeyword, "expected action");
         try appendAction(allocator, &body, t, lex, diag);
     }
 }
 
+/// The allocator is expected to be an arena (or other leak-tolerant
+/// allocator): on error, AST slices allocated before the failing token
+/// are not freed (only the bindings buffer is errdefer'd); on success,
+/// all AST memory is owned by the caller's allocator.
 pub fn parse(allocator: std.mem.Allocator, src: []const u8, diag: *?Diagnostic) ParseError!Program {
     var lex = lexer.Lexer{ .src = src };
     var bindings: std.ArrayList(Binding) = .empty;
@@ -201,12 +205,11 @@ pub fn parse(allocator: std.mem.Allocator, src: []const u8, diag: *?Diagnostic) 
         const tok = try nextTok(&lex, diag);
         if (tok.type == .eof) break;
         if (tok.type == .semicolon) continue;
-        if (tok.type != .keyword) return failTok(diag, tok, "expected `on`");
-        if (!std.mem.eql(u8, tok.text, "on")) return failTok(diag, tok, "expected `on`");
+        if (tok.type != .keyword) return failTok(diag, tok, error.ExpectedKeyword, "expected `on`");
+        if (!std.mem.eql(u8, tok.text, "on")) return failTok(diag, tok, error.ExpectedKeyword, "expected `on`");
         const ev_tok = try nextTok(&lex, diag);
         if (ev_tok.type != .keyword or !isEvent(ev_tok.text)) {
-            setDiag(diag, ev_tok.line, ev_tok.col, "unknown event type");
-            return error.UnknownKeyword;
+            return failTok(diag, ev_tok, error.UnknownKeyword, "unknown event type");
         }
         const event = try allocator.dupe(u8, ev_tok.text);
         const sel = try expectString(allocator, &lex, diag);
@@ -280,4 +283,28 @@ test "missing brace is a parse error with diagnostic" {
 
 test "unknown action keyword is rejected" {
     try expectError(error.UnknownKeyword, parseWith("on click \"#b\" { frobnicate \"x\" on \"#o\"; }"));
+}
+
+test "unknown event type is rejected" {
+    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    var diag: ?parser.Diagnostic = null;
+    try expectError(error.UnknownKeyword, parser.parse(arena.allocator(), "on dblclick \"#b\" { }", &diag));
+    try expect(diag != null);
+    try expectEqual(@as(u32, 1), diag.?.line);
+}
+
+test "top-level non-on keyword is rejected" {
+    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    var diag: ?parser.Diagnostic = null;
+    try expectError(error.ExpectedKeyword, parser.parse(arena.allocator(), "frobnicate \"#b\" { }", &diag));
+    try expect(diag != null);
+}
+
+test "empty program has zero bindings" {
+    const prog = try parseWith("");
+    try expectEqual(@as(usize, 0), prog.bindings.len);
+}
+
+test "event-name slot with a string is rejected" {
+    try expectError(error.UnknownKeyword, parseWith("on \"#b\" { }"));
 }
