@@ -31,7 +31,6 @@ let failures = 0;
 for (const f of fs.readdirSync(dir).filter((x) => x.endsWith(".bin")).sort()) {
   const name = f.replace(/\.bin$/, "");
   const bin = bc.parseBin(fs.readFileSync(path.join(dir, f), "utf8"));
-  const expected = JSON.parse(fs.readFileSync(path.join(dir, name + ".expected.json"), "utf8"));
   let ins;
   try {
     ins = bc.decode(bin);
@@ -51,6 +50,7 @@ for (const f of fs.readdirSync(dir).filter((x) => x.endsWith(".bin")).sort()) {
     console.log(`UPDATED ${name}`);
     continue;
   }
+  const expected = JSON.parse(fs.readFileSync(path.join(dir, name + ".expected.json"), "utf8"));
   if (JSON.stringify(got) !== JSON.stringify(expected.instructions)) {
     console.error(`FAIL ${name}: listing mismatch`);
     console.error("  got:      " + JSON.stringify(got));
@@ -85,6 +85,25 @@ for (const f of fs.readdirSync(dir).filter((x) => x.endsWith(".bin")).sort()) {
   }
   if (ok) console.log(`PASS ${name}: ${len} bytes, ${ins.length} instructions`);
   else failures++;
+}
+if (version === "v0.2") {
+  const seen = new Set();
+  for (const f of fs.readdirSync(dir).filter((x) => x.endsWith(".bin"))) {
+    for (const it of bc.decode(bc.parseBin(fs.readFileSync(path.join(dir, f), "utf8")))) seen.add(it.op);
+  }
+  const EMITTABLE = [...VERSIONS["v0.2"]].filter((o) => o !== 13 && o !== 25); // CMP_STR/JMP_IF_TRUE have no v0.2 emission path
+  const missing = EMITTABLE.filter((o) => !seen.has(o));
+  if (missing.length) {
+    console.error(`FAIL v0.2 opcode coverage: not exercised: ${missing.map((o) => "0x" + o.toString(16)).join(", ")}`);
+    failures++;
+  } else {
+    console.log("PASS v0.2 opcode coverage: all emittable opcodes exercised");
+  }
+  const migrationBin = fs.readFileSync(path.join(dir, "migration.bin"), "utf8");
+  if (!bc.decode(bc.parseBin(migrationBin)).some((x) => x.op === 19)) {
+    console.error("FAIL migration fixture does not use CMP_EQ (v0.1 semantics would still apply)");
+    failures++;
+  }
 }
 console.log(failures ? `\n${failures} FAILURE(S)` : "\nALL FIXTURES VALID");
 process.exitCode = failures ? 1 : 0;

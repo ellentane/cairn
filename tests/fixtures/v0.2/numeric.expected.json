@@ -1,0 +1,31 @@
+{
+  "dsl": "let a = 0.1 + 0.2;\nlet b = 1000000000000000000000;\nlet c = 0.0000001;\non load \"#o\" {\n    set_text a on \"#o\";\n    set_text b on \"#o\";\n    set_text c on \"#o\";\n}",
+  "instructions": [
+    {"pos": 0, "name": "PUSH_STR", "s": "0.1"},
+    {"pos": 6, "name": "PUSH_STR", "s": "0.2"},
+    {"pos": 12, "name": "ADD_NUM"},
+    {"pos": 13, "name": "STORE_VAR", "s": "a"},
+    {"pos": 17, "name": "PUSH_STR", "s": "1000000000000000000000"},
+    {"pos": 42, "name": "STORE_VAR", "s": "b"},
+    {"pos": 46, "name": "PUSH_STR", "s": "0.0000001"},
+    {"pos": 58, "name": "STORE_VAR", "s": "c"},
+    {"pos": 62, "name": "PUSH_SELECTOR", "s": "#o"},
+    {"pos": 67, "name": "GET_NODES"},
+    {"pos": 68, "name": "ON_EVENT", "s": "load", "addr": 78},
+    {"pos": 77, "name": "HALT"},
+    {"pos": 78, "name": "PUSH_VAR", "s": "a"},
+    {"pos": 82, "name": "PUSH_SELECTOR", "s": "#o"},
+    {"pos": 87, "name": "GET_NODES"},
+    {"pos": 88, "name": "SET_TEXT_POP"},
+    {"pos": 89, "name": "PUSH_VAR", "s": "b"},
+    {"pos": 93, "name": "PUSH_SELECTOR", "s": "#o"},
+    {"pos": 98, "name": "GET_NODES"},
+    {"pos": 99, "name": "SET_TEXT_POP"},
+    {"pos": 100, "name": "PUSH_VAR", "s": "c"},
+    {"pos": 104, "name": "PUSH_SELECTOR", "s": "#o"},
+    {"pos": 109, "name": "GET_NODES"},
+    {"pos": 110, "name": "SET_TEXT_POP"},
+    {"pos": 111, "name": "HALT"}
+  ],
+  "len": 112
+}
