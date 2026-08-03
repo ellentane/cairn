@@ -25,6 +25,7 @@ pub fn eventNameFor(evt: []const u8) []const u8 {
 }
 
 fn appendStr(allocator: std.mem.Allocator, buf: *std.ArrayList(u8), s: []const u8) !void {
+    if (s.len > std.math.maxInt(u16)) return error.BytecodeTooLarge;
     const n: u16 = @intCast(s.len);
     const lo: u8 = @truncate(n);
     const hi: u8 = @truncate(n >> 8);
@@ -69,6 +70,7 @@ fn emitAction(allocator: std.mem.Allocator, buf: *std.ArrayList(u8), action: par
             const slot = buf.items.len; // backpatch: target = end of body
             try buf.appendSlice(allocator, &.{ 0, 0 });
             for (s.body) |a| try emitAction(allocator, buf, a);
+            if (buf.items.len > std.math.maxInt(u16)) return error.BytecodeTooLarge;
             const target: u16 = @intCast(buf.items.len);
             buf.items[slot] = @truncate(target);
             buf.items[slot + 1] = @truncate(target >> 8);
@@ -102,12 +104,12 @@ pub fn compile(allocator: std.mem.Allocator, prog: parser.Program) CompileError!
         try buf.append(allocator, op.HALT); // trailing block terminator: handlers must not run into the next block
     }
 
+    if (buf.items.len > std.math.maxInt(u16) + 1) return error.BytecodeTooLarge;
     for (addr_slots.items, 0..) |slot, idx| {
         const addr: u16 = @intCast(block_starts.items[idx]);
         buf.items[slot] = @truncate(addr);
         buf.items[slot + 1] = @truncate(addr >> 8);
     }
-    if (buf.items.len > 0xFFFF) return error.BytecodeTooLarge;
     return buf.toOwnedSlice(allocator);
 }
 
@@ -115,6 +117,7 @@ const compiler = @import("compiler.zig");
 const expectEqual = std.testing.expectEqual;
 const expectEqualSlices = std.testing.expectEqualSlices;
 const expectEqualStrings = std.testing.expectEqualStrings;
+const expectError = std.testing.expectError;
 
 fn compileWith(src: []const u8) ![]u8 {
     // arena intentionally leaked (page_allocator); deinit would free the bytecode
@@ -152,4 +155,13 @@ test "hover maps to mouseenter" {
 test "empty program is just HALT" {
     const bc = try compileWith("");
     try expectEqualSlices(u8, &[_]u8{0x0A}, bc);
+}
+
+test "oversized string returns BytecodeTooLarge" {
+    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    var big: std.ArrayList(u8) = .empty;
+    try big.appendSlice(arena.allocator(), "on click \"#b\" { set_text \"");
+    try big.appendNTimes(arena.allocator(), 'x', 70000);
+    try big.appendSlice(arena.allocator(), "\" on \"#o\"; }");
+    try expectError(error.BytecodeTooLarge, compileWith(big.items));
 }
