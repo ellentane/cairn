@@ -1,0 +1,21 @@
+{
+  "dsl": "on click \"#go\" {\n    extract_text \"#src\" to v;\n    if v == \"yes\" {\n        set_text \"hit\" on \"#dst\";\n    }\n}",
+  "instructions": [
+    {"pos": 0, "name": "PUSH_SELECTOR", "s": "#go"},
+    {"pos": 6, "name": "GET_NODES"},
+    {"pos": 7, "name": "ON_EVENT", "s": "click", "addr": 18},
+    {"pos": 17, "name": "HALT"},
+    {"pos": 18, "name": "PUSH_SELECTOR", "s": "#src"},
+    {"pos": 25, "name": "GET_NODES"},
+    {"pos": 26, "name": "EXTRACT_TEXT", "s": "v"},
+    {"pos": 30, "name": "PUSH_VAR", "s": "v"},
+    {"pos": 34, "name": "PUSH_STR", "s": "yes"},
+    {"pos": 40, "name": "CMP_STR"},
+    {"pos": 41, "name": "JMP_IF_FALSE", "addr": 58},
+    {"pos": 44, "name": "PUSH_SELECTOR", "s": "#dst"},
+    {"pos": 51, "name": "GET_NODES"},
+    {"pos": 52, "name": "SET_TEXT", "s": "hit"},
+    {"pos": 58, "name": "HALT"}
+  ],
+  "len": 59
+}

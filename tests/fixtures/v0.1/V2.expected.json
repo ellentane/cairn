@@ -1,0 +1,21 @@
+{
+  "dsl": "on click \"#a\" {\n    set_text \"1\" on \"#a\";\n}\non input \"#b\" {\n    add_class \"x\" on \"#b\";\n}",
+  "instructions": [
+    {"pos": 0, "name": "PUSH_SELECTOR", "s": "#a"},
+    {"pos": 5, "name": "GET_NODES"},
+    {"pos": 6, "name": "ON_EVENT", "s": "click", "addr": 33},
+    {"pos": 16, "name": "PUSH_SELECTOR", "s": "#b"},
+    {"pos": 21, "name": "GET_NODES"},
+    {"pos": 22, "name": "ON_EVENT", "s": "input", "addr": 44},
+    {"pos": 32, "name": "HALT"},
+    {"pos": 33, "name": "PUSH_SELECTOR", "s": "#a"},
+    {"pos": 38, "name": "GET_NODES"},
+    {"pos": 39, "name": "SET_TEXT", "s": "1"},
+    {"pos": 43, "name": "HALT"},
+    {"pos": 44, "name": "PUSH_SELECTOR", "s": "#b"},
+    {"pos": 49, "name": "GET_NODES"},
+    {"pos": 50, "name": "ADD_CLASS", "s": "x"},
+    {"pos": 54, "name": "HALT"}
+  ],
+  "len": 55
+}

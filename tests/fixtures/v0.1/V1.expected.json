@@ -1,0 +1,14 @@
+{
+  "dsl": "on click \"#btn\" {\n    set_text \"Status: 1\" on \"#out\";\n}",
+  "instructions": [
+    {"pos": 0, "name": "PUSH_SELECTOR", "s": "#btn"},
+    {"pos": 7, "name": "GET_NODES"},
+    {"pos": 8, "name": "ON_EVENT", "s": "click", "addr": 19},
+    {"pos": 18, "name": "HALT"},
+    {"pos": 19, "name": "PUSH_SELECTOR", "s": "#out"},
+    {"pos": 26, "name": "GET_NODES"},
+    {"pos": 27, "name": "SET_TEXT", "s": "Status: 1"},
+    {"pos": 39, "name": "HALT"}
+  ],
+  "len": 40
+}
