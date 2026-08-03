@@ -76,19 +76,31 @@ pub fn build(allocator: std.mem.Allocator, opts: struct {
     content: []const u8,
     bytecode: []const u8,
     title: []const u8,
+    debug_encoding: bool = false,
+    css: ?[]const u8 = null,
 }) EmitterError!Page {
     const title_escaped = try escapeTitle(allocator, opts.title);
 
-    var bytes_literal: std.ArrayList(u8) = .empty;
-    defer bytes_literal.deinit(allocator);
-    try bytes_literal.append(allocator, '[');
-    try appendBytesLiteral(allocator, &bytes_literal, opts.bytecode);
-    try bytes_literal.append(allocator, ']');
-    const bytecode_len = bytes_literal.items.len;
+    var bytes_expr: std.ArrayList(u8) = .empty;
+    defer bytes_expr.deinit(allocator);
+    if (opts.debug_encoding) {
+        try bytes_expr.append(allocator, '[');
+        try appendBytesLiteral(allocator, &bytes_expr, opts.bytecode);
+        try bytes_expr.append(allocator, ']');
+    } else {
+        const encoded_len = std.base64.standard.Encoder.calcSize(opts.bytecode.len);
+        const encoded = try allocator.alloc(u8, encoded_len);
+        defer allocator.free(encoded);
+        _ = std.base64.standard.Encoder.encode(encoded, opts.bytecode);
+        try bytes_expr.appendSlice(allocator, "Uint8Array.from(atob(\"");
+        try bytes_expr.appendSlice(allocator, encoded);
+        try bytes_expr.appendSlice(allocator, "\"), function(c){return c.charCodeAt(0);})");
+    }
+    const bytecode_len = bytes_expr.items.len;
 
     var script: std.ArrayList(u8) = .empty;
     defer script.deinit(allocator);
-    try replaceInto(allocator, &script, vm_source, "__CAIRN_BYTES__", bytes_literal.items);
+    try replaceInto(allocator, &script, vm_source, "__CAIRN_BYTES__", bytes_expr.items);
     const vm_len = script.items.len - bytecode_len;
 
     var staged: std.ArrayList(u8) = .empty;
@@ -102,6 +114,11 @@ pub fn build(allocator: std.mem.Allocator, opts: struct {
     var page: std.ArrayList(u8) = .empty;
     defer page.deinit(allocator);
     try replaceInto(allocator, &page, staged2.items, "__CAIRN_TITLE__", title_escaped);
+
+    if (opts.css) |css| {
+        const style_close = std.mem.indexOf(u8, page.items, "</style>").?;
+        try page.insertSlice(allocator, style_close, css);
+    }
 
     const total = page.items.len;
     const content_len = opts.content.len;
@@ -155,11 +172,16 @@ const emitter = @import("emitter.zig");
 const expectEqual = std.testing.expectEqual;
 const expect = std.testing.expect;
 const expectEqualStrings = std.testing.expectEqualStrings;
+const expectEqualSlices = std.testing.expectEqualSlices;
 
 fn buildWith(content: []const u8, bytecode: []const u8, title: []const u8) !emitter.Page {
+    return buildWithOpts(content, bytecode, title, false, null);
+}
+
+fn buildWithOpts(content: []const u8, bytecode: []const u8, title: []const u8, debug_encoding: bool, css: ?[]const u8) !emitter.Page {
     // arena intentionally leaked (page_allocator); deinit would free the page
     var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
-    return emitter.build(arena.allocator(), .{ .content = content, .bytecode = bytecode, .title = title });
+    return emitter.build(arena.allocator(), .{ .content = content, .bytecode = bytecode, .title = title, .debug_encoding = debug_encoding, .css = css });
 }
 
 test "page contains doctype, title, content, bytecode, provenance, favicon" {
@@ -167,7 +189,7 @@ test "page contains doctype, title, content, bytecode, provenance, favicon" {
     try expect(std.mem.startsWith(u8, page.html, "<!DOCTYPE html>"));
     try expect(std.mem.indexOf(u8, page.html, "<title>My Page</title>") != null);
     try expect(std.mem.indexOf(u8, page.html, "<h1>Hi</h1>") != null);
-    try expect(std.mem.indexOf(u8, page.html, "cairnBoot([2, 10]);") != null);
+    try expect(std.mem.indexOf(u8, page.html, "cairnBoot(Uint8Array.from(atob(\"") != null);
     try expect(std.mem.indexOf(u8, page.html, "<!-- built with cairn v0.1 -->") != null);
     try expect(std.mem.indexOf(u8, page.html, "rel=\"icon\" href=\"data:image/svg+xml") != null);
     try expect(std.mem.indexOf(u8, page.html, "src/vm.js") == null);
@@ -216,4 +238,35 @@ test "tier naming" {
     try expectEqualStrings("Obelisk", emitter.tier(16384));
     try expectEqualStrings("Obelisk", emitter.tier(65535));
     try expectEqualStrings("Megalith", emitter.tier(65536));
+}
+
+test "base64 transport by default" {
+    const page = try buildWith("<h1>Hi</h1>", &[_]u8{ 0x02, 0x0A }, "T");
+    const needle = "cairnBoot(Uint8Array.from(atob(\"";
+    try expect(std.mem.indexOf(u8, page.html, needle) != null);
+    // decode the base64 literal and compare with the bytecode
+    const lit_start = std.mem.indexOf(u8, page.html, needle).? + needle.len;
+    const lit_end = std.mem.indexOfScalarPos(u8, page.html, lit_start, '"').?;
+    const b64 = page.html[lit_start..lit_end];
+    const dec = std.base64.standard.Decoder;
+    const size = try dec.calcSizeForSlice(b64);
+    const out = try std.testing.allocator.alloc(u8, size);
+    defer std.testing.allocator.free(out);
+    try dec.decode(out, b64);
+    try expectEqualSlices(u8, &[_]u8{ 0x02, 0x0A }, out);
+}
+
+test "decimal transport via options" {
+    const page = try buildWithOpts("", &[_]u8{ 0x0A }, "T", true, null); // debug_encoding
+    try expect(std.mem.indexOf(u8, page.html, "cairnBoot([10]);") != null);
+}
+
+test "css injection" {
+    const page = try buildWithOpts("", &[_]u8{0x0A}, "T", false, "h1 { color: red; }");
+    try expect(std.mem.indexOf(u8, page.html, "h1 { color: red; }") != null);
+    // css lands inside <style>
+    const style_open = std.mem.indexOf(u8, page.html, "<style>").?;
+    const style_close = std.mem.indexOf(u8, page.html, "</style>").?;
+    try expect(style_open < std.mem.indexOf(u8, page.html, "h1 { color: red; }").? and
+        std.mem.indexOf(u8, page.html, "h1 { color: red; }").? < style_close);
 }
