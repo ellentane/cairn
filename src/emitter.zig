@@ -64,7 +64,7 @@ fn escapeTitle(allocator: std.mem.Allocator, title: []const u8) ![]u8 {
     return buf.toOwnedSlice(allocator);
 }
 
-fn appendBytesLiteral(allocator: std.mem.Allocator, buf: *std.ArrayList(u8), bytecode: []const u8) !void {
+pub fn appendBytesLiteral(allocator: std.mem.Allocator, buf: *std.ArrayList(u8), bytecode: []const u8) !void {
     for (bytecode, 0..) |b, i| {
         if (i > 0) try buf.appendSlice(allocator, ", ");
         var tmp: [8]u8 = undefined;

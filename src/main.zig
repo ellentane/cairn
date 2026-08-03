@@ -34,13 +34,19 @@ fn printDiag(input_path: []const u8, source: []const u8, line_no: u32, col: u32,
     }
 }
 
-fn buildOne(arena: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, source: []const u8, base: []const u8) !void {
-    _ = gpa;
+fn buildOne(arena: std.mem.Allocator, io: std.Io, source: []const u8, base: []const u8) !void {
     const result = try markdown.renderAll(arena, source);
     var bytecode: []const u8 = &.{0x0A};
     if (result.dsl) |dsl| {
         var diag: ?parser.Diagnostic = null;
-        const program = try parser.parse(arena, dsl, &diag);
+        const program = parser.parse(arena, dsl, &diag) catch |e| {
+            if (diag) |d| {
+                printDiag(base, source, result.dsl_line_offset + d.line - 1, d.col, d.msg);
+            } else {
+                std.debug.print("cairn: parse error: {s}\n", .{@errorName(e)});
+            }
+            return e;
+        };
         bytecode = try compiler.compile(arena, program);
     }
     const page = try emitter.build(arena, .{
@@ -52,11 +58,7 @@ fn buildOne(arena: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, source
     const bin_path = try std.fmt.allocPrint(arena, "{s}.bin", .{base});
     var bin: std.ArrayList(u8) = .empty;
     defer bin.deinit(arena);
-    for (bytecode, 0..) |b, i| {
-        if (i > 0) try bin.appendSlice(arena, ", ");
-        var tmp: [8]u8 = undefined;
-        try bin.appendSlice(arena, std.fmt.bufPrint(&tmp, "{d}", .{b}) catch unreachable);
-    }
+    try emitter.appendBytesLiteral(arena, &bin, bytecode);
     try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = bin_path, .data = bin.items });
 
     const html_path = try std.fmt.allocPrint(arena, "{s}.html", .{base});
@@ -78,13 +80,13 @@ pub fn main(init: std.process.Init) !void {
     if (args.len < 2) usage();
 
     if (std.mem.eql(u8, args[1], "fixtures")) {
-        if (args.len < 3) usage();
+        if (args.len != 3) usage();
         const fixtures_dir = args[2];
         var dir = std.Io.Dir.cwd().openDir(io, fixtures_dir, .{ .iterate = true }) catch |e|
             fatal("cannot open {s}: {s}", .{ fixtures_dir, @errorName(e) });
         defer dir.close(io);
         var it = dir.iterate();
-        while (try it.next(io)) |entry| {
+        while (it.next(io) catch |e| fatal("cannot iterate {s}: {s}", .{ fixtures_dir, @errorName(e) })) |entry| {
             if (entry.kind != .file) continue;
             if (!std.mem.endsWith(u8, entry.name, ".md")) continue;
             const path = try std.fmt.allocPrint(arena, "{s}/{s}", .{ fixtures_dir, entry.name });
@@ -93,7 +95,7 @@ pub fn main(init: std.process.Init) !void {
                 fatal("cannot read {s}: {s}", .{ path, @errorName(e) });
             };
             defer gpa.free(source);
-            buildOne(arena, gpa, io, source, base) catch |e| {
+            buildOne(arena, io, source, base) catch |e| {
                 fatal("fixture {s}: {s}", .{ entry.name, @errorName(e) });
             };
         }
