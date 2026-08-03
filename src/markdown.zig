@@ -25,6 +25,7 @@ const MarkdownParser = struct {
     blockquote_lines: std.ArrayList([]const u8),
     table_lines: std.ArrayList([]const u8),
     cells_buf: [32][]const u8 = undefined,
+    // reserved for future inline-in-pre behavior
     in_pre: bool,
     dsl: ?[]const u8,
     dsl_line_offset: u32,
@@ -101,6 +102,7 @@ const MarkdownParser = struct {
         self.cells_buf = undefined;
         var cells: [32][]const u8 = undefined;
         var n: usize = 0;
+        var truncated = false;
         var it = std.mem.splitScalar(u8, line, '|');
         while (it.next()) |seg| {
             const t = std.mem.trim(u8, seg, " \t");
@@ -108,9 +110,14 @@ const MarkdownParser = struct {
             if (n < 32) {
                 cells[n] = t;
                 n += 1;
+            } else {
+                truncated = true;
             }
         }
+        if (truncated) std.debug.print("cairn: warning: table row exceeds 32 columns; truncating\n", .{});
         while (n > 0 and cells[n - 1].len == 0) n -= 1; // drop trailing empty
+        // cells_buf is a parser field because the returned slice must outlive
+        // this frame; a slice of the function-local array would dangle
         self.cells_buf = cells;
         return self.cells_buf[0..n];
     }
@@ -194,6 +201,7 @@ const MarkdownParser = struct {
                 try buf.appendSlice(self.allocator, line);
                 try buf.append(self.allocator, '\n');
             }
+            std.debug.print("cairn: warning: unterminated cairn-css fence; css ignored\n", .{});
             return;
         }
         // language-tagged fence (any info string)
@@ -332,7 +340,7 @@ fn appendImage(p: *MarkdownParser, buf: *std.ArrayList(u8), alt: []const u8, src
         return;
     }
     if (p.base_dir) |dir| {
-        const full = std.fmt.allocPrint(p.allocator, "{s}/{s}", .{ dir, src }) catch return;
+        const full = std.fmt.allocPrint(p.allocator, "{s}/{s}", .{ dir, src }) catch return error.OutOfMemory;
         const bytes = std.Io.Dir.cwd().readFileAlloc(p.io, full, p.allocator, .limited(1 << 20)) catch {
             std.debug.print("cairn: warning: image not found: {s}\n", .{src});
             try buf.appendSlice(p.allocator, "<img alt=\"");
@@ -344,7 +352,7 @@ fn appendImage(p: *MarkdownParser, buf: *std.ArrayList(u8), alt: []const u8, src
             std.debug.print("cairn: warning: inlined image exceeds 100 KB: {s} ({d} bytes)\n", .{ src, bytes.len });
         }
         const encoded_len = std.base64.standard.Encoder.calcSize(bytes.len);
-        const encoded = p.allocator.alloc(u8, encoded_len) catch return;
+        const encoded = p.allocator.alloc(u8, encoded_len) catch return error.OutOfMemory;
         _ = std.base64.standard.Encoder.encode(encoded, bytes);
         try buf.appendSlice(p.allocator, "<img alt=\"");
         try appendEscaped(p.allocator, buf, alt);
@@ -514,6 +522,11 @@ test "second cairn block is an error" {
 test "title falls back to raw h1 html" {
     const r = try renderWith("<h1 class=\"x\">Raw</h1>\n");
     try expectEqualStrings("Raw", r.title.?);
+}
+
+test "title keeps raw inline markup (documented limitation)" {
+    const r = try renderWith("# **Bold** Title\n");
+    try expectEqualStrings("**Bold** Title", r.title.?);
 }
 
 test "h2 through h6 headings" {
