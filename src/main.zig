@@ -17,8 +17,10 @@ fn printDiag(input_path: []const u8, source: []const u8, line_no: u32, col: u32,
     var i: u32 = 1;
     while (lines.next()) |line| : (i += 1) {
         if (i == line_no) {
-            std.debug.print("  {d} | {s}\n", .{ line_no, line });
-            std.debug.print("    | ", .{});
+            var tmp: [16]u8 = undefined;
+            const gutter = std.fmt.bufPrint(&tmp, "  {d} | ", .{line_no}) catch unreachable;
+            std.debug.print("{s}{s}\n", .{ gutter, line });
+            std.debug.print("{s}", .{gutter});
             var c: u32 = 1;
             while (c < col) : (c += 1) std.debug.print(" ", .{});
             std.debug.print("^\n", .{});
@@ -45,7 +47,7 @@ pub fn main(init: std.process.Init) !void {
     defer gpa.free(source);
 
     const result = markdown.renderAll(arena, source) catch |e| {
-        fatal("{s}", .{@errorName(e)});
+        fatal("markdown error: {s}", .{@errorName(e)});
     };
 
     var bytecode: []const u8 = &.{0x0A};
