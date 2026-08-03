@@ -8,6 +8,11 @@ const VERSIONS = {
   "v0.1": new Set([1,2,3,4,5,6,7,8,9,10,11,12,13,14]),
   "v0.2": new Set([1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27]),
 };
+// Size goldens (§14 promise): minified VM bytes read from src/vm.min.js.
+const GOLDENS = {
+  "v0.1": { vm_max: 6000 },
+  "v0.2": { vm_max: 6000 }, // minified VM bytes (read from src/vm.min.js; verified 4735 B)
+};
 const version = process.argv[3] || (process.argv[2] && process.argv[2] !== "--update" ? process.argv[2] : null) || "v0.1";
 const allowed = VERSIONS[version];
 if (!allowed) { console.error("unknown version " + version + " (usage: fixture_check.js [--update] [v0.1|v0.2])"); process.exit(2); }
@@ -103,6 +108,36 @@ if (version === "v0.2") {
   if (!bc.decode(bc.parseBin(migrationBin)).some((x) => x.op === 19)) {
     console.error("FAIL migration fixture does not use CMP_EQ (v0.1 semantics would still apply)");
     failures++;
+  }
+}
+// size goldens: VM source must stay under budget; every fixture's .sizes.json
+// must exist and its total must not exceed 64 KB (Obelisk boundary). The v0.1
+// corpus is immutable and was never given .html/.sizes.json, so the per-fixture
+// .sizes.json requirement applies only to v0.2+; the VM golden applies to both.
+const vmMin = fs.readFileSync(path.join(__dirname, "..", "src", "vm.min.js"), "utf8").length;
+const golden = GOLDENS[version];
+if (!golden) { console.error(`FAIL size golden: no GOLDENS entry for ${version}`); failures++; }
+else if (vmMin > golden.vm_max) {
+  console.error(`FAIL size golden: minified VM ${vmMin} B > ${GOLDENS[version].vm_max} B`);
+  failures++;
+} else {
+  console.log(`PASS size golden: minified VM ${vmMin} B`);
+}
+const sizeFiles = fs.readdirSync(dir).filter((x) => x.endsWith(".sizes.json")).sort();
+if (version !== "v0.1") {
+  for (const md of fs.readdirSync(dir).filter((x) => x.endsWith(".md"))) {
+    const stem = md.replace(/\.md$/, "");
+    if (!sizeFiles.includes(stem + ".sizes.json")) {
+      console.error(`FAIL size golden: ${md} has no .sizes.json`);
+      failures++;
+    }
+  }
+  for (const f of sizeFiles) {
+    const sizes = JSON.parse(fs.readFileSync(path.join(dir, f), "utf8"));
+    if (sizes.total > 64 * 1024) {
+      console.error(`FAIL size golden: ${f} total ${sizes.total} B > 64 KB`);
+      failures++;
+    }
   }
 }
 console.log(failures ? `\n${failures} FAILURE(S)` : "\nALL FIXTURES VALID");

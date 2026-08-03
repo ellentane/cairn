@@ -144,7 +144,7 @@ function cairnBoot(bytes, doc) {
 }
 
 if (typeof document !== "undefined") {
-  var go = function() { cairnBoot([2, 3, 0, 35, 103, 111, 3, 8, 5, 0, 99, 108, 105, 99, 107, 18, 0, 10, 2, 4, 0, 35, 115, 114, 99, 3, 11, 1, 0, 118, 12, 1, 0, 118, 1, 2, 0, 48, 53, 19, 14, 61, 0, 2, 4, 0, 35, 100, 115, 116, 3, 7, 7, 0, 109, 97, 116, 99, 104, 101, 100, 10]); };
+  var go = function() { cairnBoot(Uint8Array.from(atob("AgMAI2dvAwgFAGNsaWNrEgAKAgQAI3NyYwMLAQB2DAEAdgECADA1Ew49AAIEACNkc3QDBwcAbWF0Y2hlZAo="), function(c){return c.charCodeAt(0);})); };
   if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", go);
   else go();
 }
