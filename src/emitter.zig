@@ -84,28 +84,27 @@ pub fn build(allocator: std.mem.Allocator, opts: struct {
     try bytes_literal.append(allocator, '[');
     try appendBytesLiteral(allocator, &bytes_literal, opts.bytecode);
     try bytes_literal.append(allocator, ']');
+    const bytecode_len = bytes_literal.items.len;
 
     var script: std.ArrayList(u8) = .empty;
     defer script.deinit(allocator);
     try replaceInto(allocator, &script, vm_source, "__CAIRN_BYTES__", bytes_literal.items);
+    const vm_len = script.items.len - bytecode_len;
 
     var staged: std.ArrayList(u8) = .empty;
     defer staged.deinit(allocator);
     try replaceInto(allocator, &staged, template, "__CAIRN_VM__", script.items);
 
-    var page: std.ArrayList(u8) = .empty;
-    defer page.deinit(allocator);
     var staged2: std.ArrayList(u8) = .empty;
     defer staged2.deinit(allocator);
-    try replaceInto(allocator, &staged2, staged.items, "__CAIRN_TITLE__", title_escaped);
-    try replaceInto(allocator, &page, staged2.items, "__CAIRN_CONTENT__", opts.content);
+    try replaceInto(allocator, &staged2, staged.items, "__CAIRN_CONTENT__", opts.content);
+
+    var page: std.ArrayList(u8) = .empty;
+    defer page.deinit(allocator);
+    try replaceInto(allocator, &page, staged2.items, "__CAIRN_TITLE__", title_escaped);
 
     const total = page.items.len;
     const content_len = opts.content.len;
-    const bytecode_len = bytes_literal.items.len;
-    const script_start = std.mem.indexOf(u8, page.items, "<script>").? + "<script>".len;
-    const script_end = std.mem.indexOf(u8, page.items[script_start..], "</script>").? + script_start;
-    const vm_len = (script_end - script_start) - bytecode_len;
     const shell_len = total - content_len - vm_len - bytecode_len;
 
     return .{
@@ -168,6 +167,7 @@ test "size accounting sums to total" {
     try expectEqual(page.sizes.total, page.html.len);
     try expectEqual(page.sizes.total, page.sizes.shell + page.sizes.content + page.sizes.vm + page.sizes.bytecode);
     try expectEqual(page.sizes.content, "<h1>Hi</h1>".len);
+    try expectEqual(@as(usize, vm_source.len - 15), page.sizes.vm);
 }
 
 test "half-life math" {
@@ -179,4 +179,20 @@ test "half-life math" {
 test "title is escaped" {
     const page = try buildWith("", &[_]u8{0x0A}, "A < B");
     try expect(std.mem.indexOf(u8, page.html, "<title>A &lt; B</title>") != null);
+}
+
+test "script tag in content does not corrupt accounting" {
+    const page = try buildWith("<script>alert(1)</script>", &[_]u8{0x0A}, "T");
+    try expectEqual(page.sizes.total, page.html.len);
+    try expectEqual(page.sizes.total, page.sizes.shell + page.sizes.content + page.sizes.vm + page.sizes.bytecode);
+    try expectEqual(page.sizes.content, "<script>alert(1)</script>".len);
+    const page2 = try buildWith("<script></script>", &[_]u8{0x0A}, "T");
+    try expectEqual(page2.sizes.total, page2.html.len);
+    try expectEqual(page2.sizes.vm, page.sizes.vm);
+}
+
+test "title containing placeholder literal is not clobbered" {
+    const page = try buildWith("<p>x</p>", &[_]u8{0x0A}, "__CAIRN_CONTENT__");
+    try expect(std.mem.indexOf(u8, page.html, "<title>__CAIRN_CONTENT__</title>") != null);
+    try expect(std.mem.indexOf(u8, page.html, "<p>x</p>") != null);
 }
