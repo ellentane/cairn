@@ -182,7 +182,7 @@ fn indexOfAnyPattern(haystack: []const u8, needles: []const []const u8) ?usize {
 fn verify(io: std.Io, arena: std.mem.Allocator, path: []const u8) !void {
     const html = try std.Io.Dir.cwd().readFileAlloc(io, path, arena, .limited(1 << 24));
     var found: usize = 0;
-    const patterns = [_][]const u8{ "https://", "http://", "fetch(", "XMLHttpRequest", "WebSocket", "src=\"http", "href=\"http", "@import" };
+    const patterns = [_][]const u8{ "https://", "http://", "fetch(", "XMLHttpRequest", "WebSocket", "src=\"http", "href=\"http", "src=\"//", "href=\"//", "@import" };
     // data: URIs (the template's inline favicon, inlined images) are hermetic by
     // construction — strip them before scanning so the SVG xmlns does not trip the audit
     var scrubbed: std.ArrayList(u8) = .empty;

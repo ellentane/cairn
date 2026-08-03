@@ -57,12 +57,9 @@ PY
   fi
 done
 
-echo "== hermiticity spot-check (no external refs in output) =="
+echo "== hermiticity audit (cairn verify) =="
 ./zig-out/bin/cairn build example/index.md >/dev/null 2>&1
-if grep -E "https?://|src=\"http|href=\"http" index.html | grep -v "data:image/svg"; then
-  echo "FAIL: external references found" >&2
-  exit 1
-fi
+./zig-out/bin/cairn verify index.html >/dev/null 2>&1 || { echo "FAIL: external references found"; exit 1; }
 echo "PASS no external references"
 
 echo "== v0.2 gate: example interactions =="

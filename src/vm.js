@@ -21,6 +21,7 @@ function cairnBoot(bytes, doc) {
   function top() { return S[S.length - 1]; }
   function str() {
     var n = u16();
+    if (ip + n > B.length) throw new Error("TruncatedString");
     var s = new TextDecoder().decode(B.subarray(ip, ip + n));
     ip += n;
     return s;
