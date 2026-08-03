@@ -81,8 +81,15 @@ function MockDoc(){this.nodes={}}
 MockDoc.prototype.add=function(n){this.nodes[n.id]=n};
 MockDoc.prototype.querySelectorAll=function(sel){const k=sel.slice(1);return this.nodes[k]?[this.nodes[k]]:[]};
 const html = fs.readFileSync("index.html","utf8");
-const m = /cairnBoot\(\s*\[\s*([\s\S]*?)\s*\]\s*\)/.exec(html);
-const prog = JSON.parse("[" + m[1].replace(/\s+/g," ") + "]");
+let prog = null;
+let mb = /cairnBoot\(Uint8Array.from\(atob\(\"([^\"]+)\"/.exec(html);
+if (mb) {
+  prog = [...Buffer.from(mb[1], "base64")];
+} else {
+  const m = /cairnBoot\(\s*\[\s*([\s\S]*?)\s*\]\s*\)/.exec(html);
+  if (m) prog = JSON.parse("[" + m[1].replace(/\s+/g," ") + "]");
+}
+if (!prog) { console.error("FAIL: no cairnBoot literal found"); process.exit(1); }
 const d = new MockDoc();
 for (const id of ["btn","out","chk","status","box","inc","count","name"]) d.add(new MockNode(id));
 d.nodes.status.textContent = "pending";
