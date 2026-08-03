@@ -211,6 +211,7 @@ fn emitAction(allocator: std.mem.Allocator, buf: *std.ArrayList(u8), action: par
             try buf.appendSlice(allocator, &.{ 0, 0 });
             for (s.body) |a| try emitAction(allocator, buf, a);
             try buf.append(allocator, op.JUMP);
+            if (top > std.math.maxInt(u16)) return error.BytecodeTooLarge;
             try appendAddr(allocator, buf, @intCast(top));
             try patch16(buf, end_slot);
         },
@@ -306,5 +307,14 @@ test "oversized string returns BytecodeTooLarge" {
     try big.appendSlice(arena.allocator(), "on click \"#b\" { set_text \"");
     try big.appendNTimes(arena.allocator(), 'x', 70000);
     try big.appendSlice(arena.allocator(), "\" on \"#o\"; }");
+    try expectError(error.BytecodeTooLarge, compileWith(big.items));
+}
+
+test "while loop past 64KiB returns BytecodeTooLarge" {
+    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    var big: std.ArrayList(u8) = .empty;
+    try big.appendSlice(arena.allocator(), "on click \"#b\" { set_text \"");
+    try big.appendNTimes(arena.allocator(), 'x', 66000);
+    try big.appendSlice(arena.allocator(), "\" on \"#o\"; while n < 3 { inc n; } }");
     try expectError(error.BytecodeTooLarge, compileWith(big.items));
 }
