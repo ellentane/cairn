@@ -1,2 +1,4 @@
 // src/lib.zig
-// library root; module re-exports added as each module lands
+const std = @import("std");
+pub const lexer = @import("lexer.zig");
+pub const parser = @import("parser.zig");
