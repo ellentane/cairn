@@ -123,9 +123,13 @@ async function main() {
   // 5. PUSH_VAR default ""
   {
     const d = fresh();
-    const asm = new bc.Asm().byte(OP.PUSH_VAR).str("nope").byte(OP.PUSH_STR).str("").byte(OP.CMP_STR);
-    boot(asm.finish(), d); // must not throw
-    passed++; console.log("PASS uninitialized var defaults to empty string");
+    const asm = new bc.Asm()
+      .byte(OP.PUSH_VAR).str("nope").byte(OP.PUSH_STR).str("").byte(OP.CMP_STR)
+      .jif("skip")
+      .byte(OP.PUSH_SELECTOR).str("#out").byte(OP.GET_NODES).byte(OP.SET_TEXT).str("default-ok")
+      .label("skip").byte(OP.HALT);
+    boot(asm.finish(), d);
+    eq(d.nodes.out.textContent, "default-ok", "uninitialized var defaults to empty string");
   }
 
   // 6. step limit: infinite while loop throws StepLimitExceeded
@@ -169,7 +173,7 @@ async function main() {
     const d = fresh();
     let threw = null;
     try { boot([0x7F, 10], d); } catch (e) { threw = e.message; }
-    eq(threw !== null && threw.startsWith("UnknownOpcode"), true, "unknown opcode throws");
+    eq(threw, "UnknownOpcode 0x7f @ 0", "unknown opcode throws");
   }
 
   // 10. --from-file mode: run the built example page (transport-aware: decimal or base64)
