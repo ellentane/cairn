@@ -13,6 +13,9 @@ zig build test
 echo "== fixture validator =="
 node tests/fixture_check.js
 
+echo "== v0.2 fixture validator (migration + coverage) =="
+node tests/fixture_check.js v0.2
+
 echo "== VM behavior suite =="
 node tests/vm_test.js
 
@@ -63,7 +66,6 @@ echo "== v0.2 gate: example interactions =="
 node - <<'EOF'
 const fs = require("fs");
 const path = require("path");
-const bc = require(path.join(process.cwd(), "tests/bytecode.js"));
 const src = fs.readFileSync("src/vm.js", "utf8");
 const boot = new Function(src + "\n;return cairnBoot;")();
 function MockClassList(){this.set=new Set()}
@@ -82,7 +84,7 @@ const d = new MockDoc();
 for (const id of ["btn","out","chk","status","box","inc","count","name"]) d.add(new MockNode(id));
 d.nodes.status.textContent = "pending";
 d.nodes.name.value = "world";
-const vm = boot(prog, d);
+boot(prog, d);
 d.nodes.inc.fire("click");
 if (d.nodes.out.textContent !== "1 clicks") { console.error("FAIL counter 1"); process.exit(1); }
 d.nodes.inc.fire("click");
