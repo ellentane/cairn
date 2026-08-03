@@ -8,7 +8,7 @@ const VERSIONS = {
   "v0.1": new Set([1,2,3,4,5,6,7,8,9,10,11,12,13,14]),
   "v0.2": new Set([1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27]),
 };
-const version = process.argv[3] || "v0.1";
+const version = process.argv[3] || (process.argv[2] && process.argv[2] !== "--update" ? process.argv[2] : null) || "v0.1";
 const allowed = VERSIONS[version];
 if (!allowed) { console.error("unknown version " + version); process.exit(2); }
 
