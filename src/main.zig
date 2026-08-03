@@ -100,14 +100,19 @@ fn baseOf(path: []const u8) ?[]const u8 {
     return std.fs.path.dirname(path);
 }
 
-fn buildSource(arena: std.mem.Allocator, _: std.mem.Allocator, io: std.Io, source: []const u8, base_dir: ?[]const u8, input_path: []const u8, opts: Options) !emitter.Page {
+const RenderOut = struct {
+    page: emitter.Page,
+    bytecode: []const u8,
+};
+
+fn renderPage(arena: std.mem.Allocator, io: std.Io, source: []const u8, diag_path: []const u8, base_dir: ?[]const u8, opts: Options) !RenderOut {
     const result = try markdown.renderAll(arena, io, source, base_dir);
     var bytecode: []const u8 = &.{0x0A};
     if (result.dsl) |dsl| {
         var diag: ?parser.Diagnostic = null;
         const program = parser.parse(arena, dsl, &diag) catch |e| {
             if (diag) |d| {
-                printDiag(input_path, source, result.dsl_line_offset + d.line - 1, d.col, d.msg);
+                printDiag(diag_path, source, result.dsl_line_offset + d.line - 1, d.col, d.msg);
             } else {
                 std.debug.print("cairn: parse error: {s}\n", .{@errorName(e)});
             }
@@ -115,56 +120,53 @@ fn buildSource(arena: std.mem.Allocator, _: std.mem.Allocator, io: std.Io, sourc
         };
         bytecode = try compiler.compile(arena, program);
     }
-    return emitter.build(arena, .{
-        .content = result.html,
+    return .{
+        .page = try emitter.build(arena, .{
+            .content = result.html,
+            .bytecode = bytecode,
+            .title = result.title orelse "Cairn",
+            .debug_encoding = opts.debug_encoding,
+            .css = result.css,
+        }),
         .bytecode = bytecode,
-        .title = result.title orelse "Cairn",
-        .debug_encoding = opts.debug_encoding,
-        .css = result.css,
-    });
+    };
 }
 
-fn buildOne(arena: std.mem.Allocator, io: std.Io, source: []const u8, base: []const u8, opts: Options) !void {
-    const result = try markdown.renderAll(arena, io, source, baseOf(base));
-    var bytecode: []const u8 = &.{0x0A};
-    if (result.dsl) |dsl| {
-        var diag: ?parser.Diagnostic = null;
-        const program = parser.parse(arena, dsl, &diag) catch |e| {
-            if (diag) |d| {
-                printDiag(base, source, result.dsl_line_offset + d.line - 1, d.col, d.msg);
-            } else {
-                std.debug.print("cairn: parse error: {s}\n", .{@errorName(e)});
-            }
-            return e;
-        };
-        bytecode = try compiler.compile(arena, program);
-    }
-    const page = try emitter.build(arena, .{
-        .content = result.html,
-        .bytecode = bytecode,
-        .title = result.title orelse "Cairn",
-        .debug_encoding = opts.debug_encoding,
-        .css = result.css,
-    });
+fn buildSource(arena: std.mem.Allocator, io: std.Io, source: []const u8, base_dir: ?[]const u8, input_path: []const u8, opts: Options) !void {
+    const out = try renderPage(arena, io, source, input_path, base_dir, opts);
     if (opts.budget) |budget| {
-        if (page.sizes.total > budget * 1024) {
-            std.debug.print("cairn: budget exceeded: {d} bytes > {d} KB\n", .{ page.sizes.total, budget });
+        if (@as(u128, out.page.sizes.total) > @as(u128, budget) * 1024) {
+            fatal("budget exceeded: {d} bytes > {d} KB", .{ out.page.sizes.total, budget });
+        }
+    }
+    std.Io.Dir.cwd().writeFile(io, .{ .sub_path = opts.output, .data = out.page.html }) catch |e| {
+        fatal("cannot write {s}: {s}", .{ opts.output, @errorName(e) });
+    };
+    emitter.printReport(out.page.sizes, opts.output);
+}
+
+fn buildOne(arena: std.mem.Allocator, io: std.Io, source: []const u8, path: []const u8, opts: Options) !void {
+    const out = try renderPage(arena, io, source, path, baseOf(path), opts);
+    if (opts.budget) |budget| {
+        if (@as(u128, out.page.sizes.total) > @as(u128, budget) * 1024) {
+            std.debug.print("cairn: budget exceeded: {d} bytes > {d} KB\n", .{ out.page.sizes.total, budget });
             return error.BudgetExceeded;
         }
     }
 
+    const base = path[0 .. path.len - 3];
     const bin_path = try std.fmt.allocPrint(arena, "{s}.bin", .{base});
     var bin: std.ArrayList(u8) = .empty;
     defer bin.deinit(arena);
-    try emitter.appendBytesLiteral(arena, &bin, bytecode);
+    try emitter.appendBytesLiteral(arena, &bin, out.bytecode);
     try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = bin_path, .data = bin.items });
 
-    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = opts.output, .data = page.html });
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = opts.output, .data = out.page.html });
 
     const sizes_path = try std.fmt.allocPrint(arena, "{s}.sizes.json", .{base});
     const sizes_json = try std.fmt.allocPrint(arena,
         "{{\"total\":{d},\"shell\":{d},\"content\":{d},\"vm\":{d},\"bytecode\":{d},\"half_life\":{d},\"tier\":\"{s}\"}}",
-        .{ page.sizes.total, page.sizes.shell, page.sizes.content, page.sizes.vm, page.sizes.bytecode, emitter.halfLife(page.sizes), emitter.tier(page.sizes.total) });
+        .{ out.page.sizes.total, out.page.sizes.shell, out.page.sizes.content, out.page.sizes.vm, out.page.sizes.bytecode, emitter.halfLife(out.page.sizes), emitter.tier(out.page.sizes.total) });
     try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = sizes_path, .data = sizes_json });
 }
 
@@ -188,7 +190,21 @@ fn verify(io: std.Io, arena: std.mem.Allocator, path: []const u8) !void {
     var rest: []const u8 = html;
     while (std.mem.indexOf(u8, rest, "data:")) |idx| {
         try scrubbed.appendSlice(arena, rest[0..idx]);
-        const end = std.mem.indexOfScalarPos(u8, rest, idx, '"') orelse rest.len;
+        // a real data: URI always has its comma before any space (RFC 2397
+        // mediatype has no whitespace), so gate the scrub on it: skip only the
+        // URI itself and leave any trailing text visible to the audit
+        var end = idx + 5;
+        var comma = false;
+        while (end < rest.len) : (end += 1) {
+            const c = rest[end];
+            if (c == ',') {
+                comma = true;
+                continue;
+            }
+            if (comma) {
+                if (c == '"' or c == '>' or c == '\n' or c == '\r') break;
+            } else if (c == ' ' or c == '\t' or c == '"' or c == '\'' or c == '>' or c == '\n' or c == '\r') break;
+        }
         rest = rest[end..];
     }
     try scrubbed.appendSlice(arena, rest);
@@ -232,8 +248,7 @@ fn demo(arena: std.mem.Allocator, io: std.Io, dir: []const u8) !void {
     const source = try std.Io.Dir.cwd().readFileAlloc(io, md_path, arena, .limited(max_input));
     const out_path = try std.fmt.allocPrint(arena, "{s}/index.html", .{dir});
     const opts = Options{ .output = out_path };
-    const base = try std.fmt.allocPrint(arena, "{s}/index", .{dir});
-    try buildOne(arena, io, source, base, opts);
+    try buildOne(arena, io, source, md_path, opts);
 }
 
 pub fn main(init: std.process.Init) !void {
@@ -255,13 +270,12 @@ pub fn main(init: std.process.Init) !void {
             if (entry.kind != .file) continue;
             if (!std.mem.endsWith(u8, entry.name, ".md")) continue;
             const path = try std.fmt.allocPrint(arena, "{s}/{s}", .{ fixtures_dir, entry.name });
-            const base = try std.fmt.allocPrint(arena, "{s}/{s}", .{ fixtures_dir, entry.name[0 .. entry.name.len - 3] });
             const source = std.Io.Dir.cwd().readFileAlloc(io, path, gpa, .limited(max_input)) catch |e| {
                 fatal("cannot read {s}: {s}", .{ path, @errorName(e) });
             };
             defer gpa.free(source);
-            const opts = Options{ .output = try std.fmt.allocPrint(arena, "{s}.html", .{base}) };
-            buildOne(arena, io, source, base, opts) catch |e| {
+            const opts = Options{ .output = try std.fmt.allocPrint(arena, "{s}.html", .{path[0 .. path.len - 3]}) };
+            buildOne(arena, io, source, path, opts) catch |e| {
                 fatal("fixture {s}: {s}", .{ entry.name, @errorName(e) });
             };
         }
@@ -321,17 +335,6 @@ pub fn main(init: std.process.Init) !void {
     }
     defer if (!is_dir) gpa.free(source);
 
-    const page = buildSource(arena, gpa, io, source, base_dir, input_path, opts) catch |e|
+    buildSource(arena, io, source, base_dir, input_path, opts) catch |e|
         fatal("build error: {s}", .{@errorName(e)});
-
-    if (opts.budget) |budget| {
-        if (page.sizes.total > budget * 1024) {
-            fatal("budget exceeded: {d} bytes > {d} KB", .{ page.sizes.total, budget });
-        }
-    }
-
-    std.Io.Dir.cwd().writeFile(io, .{ .sub_path = opts.output, .data = page.html }) catch |e| {
-        fatal("cannot write {s}: {s}", .{ opts.output, @errorName(e) });
-    };
-    emitter.printReport(page.sizes, opts.output);
 }
