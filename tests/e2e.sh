@@ -106,5 +106,17 @@ if (d.nodes.out.textContent !== "hello world") { console.error("FAIL extract_val
 console.log("PASS example v0.2 interactions");
 EOF
 
+echo "== v0.3 gate: dir build, budget, verify, base64 =="
+rm -rf /tmp/opencode/site && mkdir -p /tmp/opencode/site
+cp example/index.md /tmp/opencode/site/
+./zig-out/bin/cairn build /tmp/opencode/site --output /tmp/opencode/site.html >/dev/null 2>&1
+test -f /tmp/opencode/site.html || { echo "FAIL dir build"; exit 1; }
+./zig-out/bin/cairn verify /tmp/opencode/site.html 2>&1 | grep -q "OK" || { echo "FAIL verify"; exit 1; }
+if ./zig-out/bin/cairn build /tmp/opencode/site --budget 1 >/dev/null 2>&1; then
+  echo "FAIL budget did not trip"; exit 1
+fi
+grep -q "atob" /tmp/opencode/site.html || { echo "FAIL base64 transport missing"; exit 1; }
+echo "PASS v0.3 gate"
+
 echo
 echo "E2E GATE GREEN"
