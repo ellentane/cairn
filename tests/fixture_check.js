@@ -10,9 +10,13 @@ const VERSIONS = {
 };
 const version = process.argv[3] || (process.argv[2] && process.argv[2] !== "--update" ? process.argv[2] : null) || "v0.1";
 const allowed = VERSIONS[version];
-if (!allowed) { console.error("unknown version " + version); process.exit(2); }
+if (!allowed) { console.error("unknown version " + version + " (usage: fixture_check.js [--update] [v0.1|v0.2])"); process.exit(2); }
 
 const dir = path.join(__dirname, "fixtures", version);
+if (!fs.existsSync(dir)) {
+  console.error(`fixture dir not found: ${dir} (run --update to generate)`);
+  process.exit(2);
+}
 
 function extractDslFromMd(mdPath) {
   const text = fs.readFileSync(mdPath, "utf8");
@@ -59,9 +63,8 @@ for (const f of fs.readdirSync(dir).filter((x) => x.endsWith(".bin")).sort()) {
   {
     const mdPath = path.join(dir, name + ".md");
     if (fs.existsSync(mdPath)) {
-      const mdText = fs.readFileSync(mdPath, "utf8");
-      const m = /```cairn\n([\s\S]*?)\n```/.exec(mdText);
-      if (!m || m[1] !== expected.dsl) {
+      const dslFromMd = extractDslFromMd(mdPath);
+      if (dslFromMd !== expected.dsl) {
         console.error(`FAIL ${name}: dsl does not match the .md cairn block`);
         ok = false;
       }
@@ -76,7 +79,7 @@ for (const f of fs.readdirSync(dir).filter((x) => x.endsWith(".bin")).sort()) {
       if (it.addr > len) { console.error(`FAIL ${name}: ${it.name}@${it.pos} addr ${it.addr} past end`); ok = false; continue; }
       if (it.addr === len) continue; // end-of-stream termination is legal
       if (!boundaries.has(it.addr)) { console.error(`FAIL ${name}: ${it.name}@${it.pos} addr ${it.addr} not on boundary`); ok = false; }
-      if ((it.name === "ON_EVENT" || it.name === "JUMP" || it.name === "JMP_IF_FALSE") && it.addr <= halt.pos) { console.error(`FAIL ${name}: ${it.name} addr in prologue`); ok = false; }
+      if ((it.name === "ON_EVENT" || it.name === "JUMP" || it.name === "JMP_IF_FALSE" || it.name === "JMP_IF_TRUE") && it.addr <= halt.pos) { console.error(`FAIL ${name}: ${it.name} addr in prologue`); ok = false; }
     }
     if (!allowed.has(it.op)) { console.error(`FAIL ${name}: opcode 0x${it.op.toString(16)} not allowed in ${version}`); ok = false; }
   }
