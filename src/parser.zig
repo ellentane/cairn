@@ -174,14 +174,6 @@ fn expectEquals(lex: *lexer.Lexer, diag: *?Diagnostic) ParseError!void {
     }
 }
 
-fn expectEqEq(lex: *lexer.Lexer, diag: *?Diagnostic) ParseError!void {
-    const tok = try nextTok(lex, diag);
-    if (tok.type != .eqeq) {
-        setDiag(diag, tok.line, tok.col, "expected `==`");
-        return error.ExpectedEqEq;
-    }
-}
-
 fn unescape(allocator: std.mem.Allocator, raw: []const u8) ![]u8 {
     var out: std.ArrayList(u8) = .empty;
     errdefer out.deinit(allocator);
@@ -318,6 +310,10 @@ fn parseActionBlock(allocator: std.mem.Allocator, lex: *lexer.Lexer, diag: *?Dia
     }
 }
 
+/// The allocator is expected to be an arena (or other leak-tolerant allocator):
+/// on error, AST slices and boxed expression nodes allocated before the failing
+/// token are not freed (only the statement buffer is errdefer'd). On success,
+/// all AST memory is owned by the caller's allocator.
 pub fn parse(allocator: std.mem.Allocator, src: []const u8, diag: *?Diagnostic) ParseError!Program {
     var lex = lexer.Lexer{ .src = src };
     var statements: std.ArrayList(Statement) = .empty;
@@ -335,11 +331,10 @@ pub fn parse(allocator: std.mem.Allocator, src: []const u8, diag: *?Diagnostic) 
             try statements.append(allocator, .{ .assignment = .{ .var_name = vn, .expr = expr } });
             continue;
         }
-        if (!std.mem.eql(u8, tok.text, "on")) return failTok(diag, tok, error.ExpectedKeyword, "expected `on`");
+        if (!std.mem.eql(u8, tok.text, "on")) return failTok(diag, tok, error.ExpectedKeyword, "expected `let` or `on`");
         const ev_tok = try nextTok(&lex, diag);
         if (ev_tok.type != .keyword or !isEvent(ev_tok.text)) {
-            setDiag(diag, ev_tok.line, ev_tok.col, "unknown event type");
-            return error.UnknownKeyword;
+            return failTok(diag, ev_tok, error.UnknownKeyword, "unknown event type");
         }
         const event = try allocator.dupe(u8, ev_tok.text);
         const sel = try expectString(allocator, &lex, diag);
@@ -498,4 +493,19 @@ test "empty program has zero statements" {
 
 test "event-name slot with a string is rejected" {
     try expectError(error.UnknownKeyword, parseWith("on \"#b\" { }"));
+}
+
+test "cond with literal rhs" {
+    const prog = try parseWith("on load \"#w\" { while n < 3 { inc n; } }");
+    const cond = prog.statements[0].binding.body[0].while_stmt.cond;
+    try expect(std.meta.activeTag(cond.rhs) == .lit);
+    try expectEqualStrings("3", cond.rhs.lit);
+}
+
+test "let inside a block is rejected" {
+    try expectError(error.UnknownKeyword, parseWith("on click \"#b\" { let x = 1; }"));
+}
+
+test "inc at top level is rejected" {
+    try expectError(error.ExpectedKeyword, parseWith("inc c;"));
 }
