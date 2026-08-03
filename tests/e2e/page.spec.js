@@ -42,13 +42,14 @@ test("built example: hover adds class", async ({ page }) => {
   await expect(page.locator("#box")).toHaveClass(/lit/);
 });
 
-test("built example: no network requests", async ({ page }) => {
+test("built page: only the document request fires", async ({ page }) => {
   build("example/index.md");
   const requests = [];
   page.on("request", (r) => requests.push(r.url()));
   await page.goto("/");
   await page.click("#inc");
-  expect(requests.every((u) => u.startsWith("http://127.0.0.1:8931"))).toBe(true);
+  expect(requests.length).toBe(1);
+  expect(requests[0].startsWith("http://127.0.0.1:8931")).toBe(true);
 });
 
 test("decimal debug-encoding page still boots", async ({ page }) => {
