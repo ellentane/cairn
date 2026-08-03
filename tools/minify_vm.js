@@ -1,6 +1,11 @@
 "use strict";
 // Safe lexical minifier for src/vm.js: strips // comments, leading indentation,
 // and blank lines. String-aware: never touches content inside "..." literals.
+//
+// Lexical contract (must hold for src/vm.js): double-quoted strings only (no
+// single quotes, no template literals); strings never span lines; no " or //
+// inside regex literals. Violations silently corrupt output — the dual-file
+// test suite (vm.js + vm.min.js) catches them when regeneration happens.
 const fs = require("fs");
 const path = require("path");
 

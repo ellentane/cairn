@@ -1,0 +1,23 @@
+name: ci
+on: [push, pull_request]
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: mlugg/setup-zig@v1
+        with:
+          version: 0.16.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: zig build test
+      - run: zig build
+      - run: node tests/fixture_check.js v0.2
+      - run: node tests/vm_test.js
+      - run: node tests/vm_test.js --vm-file src/vm.min.js
+      - run: zig build minify && git diff --exit-code src/vm.min.js
+      - run: ./tests/e2e.sh
+      - run: npm install
+      - run: npx playwright install --with-deps chromium
+      - run: npx playwright test

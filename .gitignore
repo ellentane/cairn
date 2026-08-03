@@ -2,3 +2,6 @@ zig-out/
 .zig-cache/
 index.html
 docs/
+node_modules/
+tmp-e2e/
+test-results/
