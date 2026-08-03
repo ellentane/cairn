@@ -125,6 +125,17 @@ pub fn halfLife(sizes: Sizes) i64 {
     return std.math.clamp(@as(i64, @intFromFloat(@round(score))), 0, 100);
 }
 
+pub fn tier(total: usize) []const u8 {
+    return if (total < 4 * 1024)
+        "Tombstone"
+    else if (total < 16 * 1024)
+        "Monolith"
+    else if (total < 64 * 1024)
+        "Obelisk"
+    else
+        "Megalith";
+}
+
 pub fn printReport(sizes: Sizes, output_path: []const u8) void {
     std.debug.print("Cairn Build Complete.\n", .{});
     std.debug.print("Output: {s}\n", .{output_path});
@@ -133,7 +144,7 @@ pub fn printReport(sizes: Sizes, output_path: []const u8) void {
     std.debug.print("  - VM Runtime: {d:.2} KB\n", .{kb(sizes.vm)});
     std.debug.print("  - Executable Bytecode: {d:.2} KB\n", .{kb(sizes.bytecode)});
     std.debug.print("  - Content Payload: {d:.2} KB\n", .{kb(sizes.content)});
-    std.debug.print("\nHalf-Life Score: {d}% (Executable economy)\n", .{halfLife(sizes)});
+    std.debug.print("\nHalf-Life Score: {d}% (Executable economy) — Tier: {s}\n", .{ halfLife(sizes), tier(sizes.total) });
 }
 
 fn kb(n: usize) f64 {
@@ -195,4 +206,14 @@ test "title containing placeholder literal is not clobbered" {
     const page = try buildWith("<p>x</p>", &[_]u8{0x0A}, "__CAIRN_CONTENT__");
     try expect(std.mem.indexOf(u8, page.html, "<title>__CAIRN_CONTENT__</title>") != null);
     try expect(std.mem.indexOf(u8, page.html, "<p>x</p>") != null);
+}
+
+test "tier naming" {
+    try expectEqualStrings("Tombstone", emitter.tier(3900));
+    try expectEqualStrings("Tombstone", emitter.tier(4095));
+    try expectEqualStrings("Monolith", emitter.tier(4096));
+    try expectEqualStrings("Monolith", emitter.tier(16383));
+    try expectEqualStrings("Obelisk", emitter.tier(16384));
+    try expectEqualStrings("Obelisk", emitter.tier(65535));
+    try expectEqualStrings("Megalith", emitter.tier(65536));
 }
