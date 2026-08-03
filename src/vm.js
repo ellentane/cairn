@@ -79,19 +79,24 @@ function cairnBoot(bytes, doc) {
           case 9: ip = u16(); break;                                 // JUMP
           case 10: return;                                           // HALT
           case 11: extractText(S.pop(), str()); break;               // EXTRACT_TEXT
-          case 12: S.push(st[str()] || ""); break;                   // PUSH_VAR
+          case 12: { var v = str(); S.push(st[v] === undefined ? "" : st[v]); break; } // PUSH_VAR
           case 13: { var b = S.pop(), a = S.pop(); S.push(a === b); break; } // CMP_STR
           case 14: { var t = u16(); if (!S.pop()) ip = t; break; }   // JMP_IF_FALSE
           case 15: { var v = str(); st[v] = S.pop(); break; }                      // STORE_VAR
           case 16: { var v = str(); if (!isNum(st[v])) throw new Error("NonNumeric");
-                     st[v] = numToStr(Number(st[v]) + 1); break; }                 // INC
-          case 17: { var b = S.pop(), a = S.pop(); S.push(bothNum(a, b) ? numToStr(Number(a) + Number(b)) : a + b); break; } // ADD_NUM
+                     var nv = Number(st[v]) + 1; if (!isFinite(nv)) throw new Error("NonNumeric");
+                     st[v] = numToStr(nv); break; }                                  // INC
+          case 17: { var b = S.pop(), a = S.pop();
+                     if (bothNum(a, b)) { var sum = Number(a) + Number(b); if (!isFinite(sum)) throw new Error("NonNumeric");
+                                          S.push(numToStr(sum)); }
+                     else S.push(a + b); break; }                                    // ADD_NUM
           case 18: { var b = S.pop(), a = S.pop(); if (!bothNum(a, b)) throw new Error("NonNumeric");
-                     S.push(numToStr(Number(a) - Number(b))); break; }             // SUB_NUM
+                     var diff = Number(a) - Number(b); if (!isFinite(diff)) throw new Error("NonNumeric");
+                     S.push(numToStr(diff)); break; }                                // SUB_NUM
           case 19: case 20: case 21: case 22: case 23: case 24:
                    { var b = S.pop(), a = S.pop(); S.push(cmp(op, a, b)); break; } // CMP family
           case 25: { var t = u16(); if (S.pop()) ip = t; break; }                  // JMP_IF_TRUE
-          case 26: { var n = S.pop(); setText(n, S.pop()); break; }                // SET_TEXT_POP
+          case 26: { var n = S.pop(); setText(n, S.pop()); break; }                // SET_TEXT_POP (pops nodes, then value)
           case 27: { var v = str(); var n = S.pop(); st[v] = n.length ? n[0].value : ""; break; } // EXTRACT_VALUE
           default: throw new Error("UnknownOpcode 0x" + op.toString(16) + " @ " + (ip - 1));
         }

@@ -242,8 +242,9 @@ async function main() {
   // 13. SUB_NUM numeric only; non-numeric throws NonNumeric
   {
     const d = fresh();
-    const asm = new bc.Asm().byte(OP.PUSH_STR).str("7").byte(OP.PUSH_STR).str("2").byte(OP.SUB_NUM);
-    boot(asm.finish(), d);
+    const vm = boot(new bc.Asm().byte(OP.PUSH_STR).str("7").byte(OP.PUSH_STR).str("2").byte(OP.SUB_NUM)
+      .byte(OP.STORE_VAR).str("r").finish(), d);
+    eq(vm.state.r, "5", "SUB_NUM 7 - 2 -> 5");
     let threw = null;
     try { boot(new bc.Asm().byte(OP.PUSH_STR).str("a").byte(OP.PUSH_STR).str("2").byte(OP.SUB_NUM).finish(), d); }
     catch (e) { threw = e.message; }
@@ -268,6 +269,18 @@ async function main() {
       .byte(OP.PUSH_STR).str("3").byte(OP.PUSH_STR).str("10").byte(OP.CMP_LT)
       .byte(OP.STORE_VAR).str("r").finish(), d);
     eq(vm.state.r, true, "CMP_LT 3 < 10 numeric");
+    function cmpOp(opcode, a, b) {
+      const vm = boot(new bc.Asm()
+        .byte(OP.PUSH_STR).str(a).byte(OP.PUSH_STR).str(b).byte(opcode)
+        .byte(OP.STORE_VAR).str("r").finish(), d);
+      return vm.state.r;
+    }
+    eq(cmpOp(OP.CMP_GT, "10", "3"), true, "CMP_GT 10 > 3 numeric");
+    eq(cmpOp(OP.CMP_GT, "3", "10"), false, "CMP_GT 3 > 10 numeric false");
+    eq(cmpOp(OP.CMP_LE, "5", "5"), true, "CMP_LE 5 <= 5");
+    eq(cmpOp(OP.CMP_GE, "5.0", "5"), true, "CMP_GE 5.0 >= 5 numeric");
+    eq(cmpOp(OP.CMP_NE, "a", "b"), true, "CMP_NE string inequality");
+    eq(cmpOp(OP.CMP_NE, "05", "5"), false, "CMP_NE numeric-aware");
   }
 
   // 15. formatter alignment: no exponent, -0 -> "0"
@@ -354,6 +367,28 @@ async function main() {
     boot(asm.finish(), d);
     d.nodes.btn.fire("click");
     eq(d.nodes.out.textContent, "8", "extract_value + set_text(expr) -> 8");
+  }
+
+  // 19. JMP_IF_TRUE jumps when true, falls through when false
+  {
+    const d = fresh();
+    const asm = new bc.Asm()
+      .byte(OP.PUSH_STR).str("").byte(OP.PUSH_STR).str("").byte(OP.CMP_EQ)
+      .byte(OP.JMP_IF_TRUE).ref16("skip")
+      .byte(OP.PUSH_SELECTOR).str("#out").byte(OP.GET_NODES).byte(OP.SET_TEXT).str("bad")
+      .label("skip").byte(OP.HALT);
+    boot(asm.finish(), d);
+    eq(d.nodes.out.textContent, "", "JMP_IF_TRUE skips when true");
+  }
+  {
+    const d = fresh();
+    const asm = new bc.Asm()
+      .byte(OP.PUSH_STR).str("a").byte(OP.PUSH_STR).str("b").byte(OP.CMP_EQ)
+      .byte(OP.JMP_IF_TRUE).ref16("skip")
+      .byte(OP.PUSH_SELECTOR).str("#out").byte(OP.GET_NODES).byte(OP.SET_TEXT).str("ok")
+      .label("skip").byte(OP.HALT);
+    boot(asm.finish(), d);
+    eq(d.nodes.out.textContent, "ok", "JMP_IF_TRUE falls through when false");
   }
 
   console.log(`\n${passed} passed, ${failed} failed`);
