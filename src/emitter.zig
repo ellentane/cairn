@@ -96,7 +96,9 @@ pub fn build(allocator: std.mem.Allocator, opts: struct {
         try bytes_expr.appendSlice(allocator, encoded);
         try bytes_expr.appendSlice(allocator, "\"), function(c){return c.charCodeAt(0);})");
     }
-    const bytecode_len = bytes_expr.items.len;
+    const bytecode_len = opts.bytecode.len;
+    // bytecode bucket = true bytecode length (encoding-independent metric);
+    // the transport wrapper (base64 expression) counts toward the vm bucket
 
     var script: std.ArrayList(u8) = .empty;
     defer script.deinit(allocator);
@@ -200,7 +202,7 @@ test "size accounting sums to total" {
     try expectEqual(page.sizes.total, page.html.len);
     try expectEqual(page.sizes.total, page.sizes.shell + page.sizes.content + page.sizes.vm + page.sizes.bytecode);
     try expectEqual(page.sizes.content, "<h1>Hi</h1>".len);
-    try expectEqual(@as(usize, vm_source.len - 15), page.sizes.vm);
+    try expectEqual(@as(usize, 2), page.sizes.bytecode);
 }
 
 test "half-life math" {
@@ -254,6 +256,7 @@ test "base64 transport by default" {
     defer std.testing.allocator.free(out);
     try dec.decode(out, b64);
     try expectEqualSlices(u8, &[_]u8{ 0x02, 0x0A }, out);
+    try expect(std.mem.indexOf(u8, page.html, "charCodeAt(0);}));") != null);
 }
 
 test "decimal transport via options" {
@@ -269,4 +272,16 @@ test "css injection" {
     const style_close = std.mem.indexOf(u8, page.html, "</style>").?;
     try expect(style_open < std.mem.indexOf(u8, page.html, "h1 { color: red; }").? and
         std.mem.indexOf(u8, page.html, "h1 { color: red; }").? < style_close);
+}
+
+test "half-life is encoding-independent" {
+    const page = try buildWith("<h1>Hi</h1>", &[_]u8{ 0x02, 0x0A }, "T");
+    const page_debug = try buildWithOpts("<h1>Hi</h1>", &[_]u8{ 0x02, 0x0A }, "T", true, null);
+    try expectEqual(emitter.halfLife(page.sizes), emitter.halfLife(page_debug.sizes));
+}
+
+test "css injection preserves size accounting" {
+    const page = try buildWithOpts("", &[_]u8{0x0A}, "T", false, "h1 { color: red; }");
+    try expectEqual(page.sizes.total, page.html.len);
+    try expectEqual(page.sizes.total, page.sizes.shell + page.sizes.content + page.sizes.vm + page.sizes.bytecode);
 }
