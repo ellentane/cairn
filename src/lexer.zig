@@ -3,10 +3,19 @@ const std = @import("std");
 pub const TokenType = enum {
     keyword, // identifier matching a DSL keyword (validated by parser)
     string,  // "..." literal; text excludes the quotes
+    number,
     lbrace,
     rbrace,
     semicolon,
     eqeq,
+    equals,
+    neq,
+    lt,
+    gt,
+    le,
+    ge,
+    plus,
+    minus,
     eof,
     @"error",
 };
@@ -29,6 +38,7 @@ pub const Lexer = struct {
     line_start: usize = 0,
     err_line: u32 = 1,
     err_col: u32 = 1,
+    pushback: ?Token = null,
 
     fn col(self: *const Lexer) u32 {
         return @intCast(self.pos - self.line_start + 1);
@@ -40,6 +50,10 @@ pub const Lexer = struct {
     }
 
     pub fn next(self: *Lexer) LexError!Token {
+        if (self.pushback) |t| {
+            self.pushback = null;
+            return t;
+        }
         while (self.pos < self.src.len) {
             const c = self.src[self.pos];
             switch (c) {
@@ -65,16 +79,49 @@ pub const Lexer = struct {
                     return .{ .type = .semicolon, .text = ";", .line = self.line, .col = start_col };
                 },
                 '=' => {
+                    if (self.pos + 1 < self.src.len and self.src[self.pos + 1] == '=') {
+                        const t = Token{ .type = .eqeq, .text = "==", .line = self.line, .col = self.col() };
+                        self.pos += 2;
+                        return t;
+                    }
+                    const t = Token{ .type = .equals, .text = "=", .line = self.line, .col = self.col() };
+                    self.pos += 1;
+                    return t;
+                },
+                '!' => {
                     if (self.pos + 1 >= self.src.len or self.src[self.pos + 1] != '=') {
                         self.markErr();
                         return error.InvalidCharacter;
                     }
-                    const t = Token{ .type = .eqeq, .text = "==", .line = self.line, .col = self.col() };
+                    const t = Token{ .type = .neq, .text = "!=", .line = self.line, .col = self.col() };
                     self.pos += 2;
+                    return t;
+                },
+                '<' => {
+                    const two = self.pos + 1 < self.src.len and self.src[self.pos + 1] == '=';
+                    const t = Token{ .type = if (two) .le else .lt, .text = if (two) "<=" else "<", .line = self.line, .col = self.col() };
+                    self.pos += if (two) 2 else 1;
+                    return t;
+                },
+                '>' => {
+                    const two = self.pos + 1 < self.src.len and self.src[self.pos + 1] == '=';
+                    const t = Token{ .type = if (two) .ge else .gt, .text = if (two) ">=" else ">", .line = self.line, .col = self.col() };
+                    self.pos += if (two) 2 else 1;
+                    return t;
+                },
+                '+' => {
+                    const t = Token{ .type = .plus, .text = "+", .line = self.line, .col = self.col() };
+                    self.pos += 1;
+                    return t;
+                },
+                '-' => {
+                    const t = Token{ .type = .minus, .text = "-", .line = self.line, .col = self.col() };
+                    self.pos += 1;
                     return t;
                 },
                 '"' => return self.string(),
                 else => {
+                    if (std.ascii.isDigit(c)) return self.number();
                     if (std.ascii.isAlphanumeric(c) or c == '_') return self.identifier();
                     self.markErr();
                     return error.InvalidCharacter;
@@ -94,6 +141,18 @@ pub const Lexer = struct {
             self.pos += 1;
         }
         return .{ .type = .keyword, .text = self.src[start..self.pos], .line = l, .col = c };
+    }
+
+    fn number(self: *Lexer) LexError!Token {
+        const start = self.pos;
+        const l = self.line;
+        const c = self.col();
+        while (self.pos < self.src.len and std.ascii.isDigit(self.src[self.pos])) self.pos += 1;
+        if (self.pos < self.src.len and self.src[self.pos] == '.') {
+            self.pos += 1;
+            while (self.pos < self.src.len and std.ascii.isDigit(self.src[self.pos])) self.pos += 1;
+        }
+        return .{ .type = .number, .text = self.src[start..self.pos], .line = l, .col = c };
     }
 
     fn string(self: *Lexer) LexError!Token {
@@ -205,10 +264,42 @@ test "CRLF line counting" {
     try expectEqual(@as(u32, 1), t.col);
 }
 
-test "lone equals error position" {
-    var lx = Lexer{ .src = "on =" };
-    _ = try lx.next();
-    try expectError(error.InvalidCharacter, lx.next());
-    try expectEqual(@as(u32, 1), lx.err_line);
-    try expectEqual(@as(u32, 4), lx.err_col);
+test "number and minus tokens" {
+    var lx = Lexer{ .src = "let v = 3.14 - 2" };
+    try expectEqual(.keyword, (try lx.next()).type); // let
+    try expectEqual(.keyword, (try lx.next()).type); // v
+    try expectEqual(.equals, (try lx.next()).type); // =
+    const num = try lx.next(); // 3.14
+    try expectEqual(.number, num.type);
+    try expectEqualStrings("3.14", num.text);
+    try expectEqual(.minus, (try lx.next()).type); // -
+    const two = try lx.next(); // 2
+    try expectEqual(.number, two.type);
+    try expectEqualStrings("2", two.text);
+}
+
+test "comparison tokens" {
+    var lx = Lexer{ .src = "== != < > <= >=" };
+    try expectEqual(.eqeq, (try lx.next()).type);
+    try expectEqual(.neq, (try lx.next()).type);
+    try expectEqual(.lt, (try lx.next()).type);
+    try expectEqual(.gt, (try lx.next()).type);
+    try expectEqual(.le, (try lx.next()).type);
+    try expectEqual(.ge, (try lx.next()).type);
+}
+
+test "single equals is its own token" {
+    var lx = Lexer{ .src = "=" };
+    try expectEqual(.equals, (try lx.next()).type);
+}
+
+test "pushback returns the pushed token before scanning" {
+    var lx = Lexer{ .src = "a = 1" };
+    _ = try lx.next(); // a
+    const eq = try lx.next(); // =
+    lx.pushback = eq;
+    const t = try lx.next();
+    try expectEqual(.equals, t.type);
+    try expectEqualStrings("=", t.text);
+    try expectEqual(.number, (try lx.next()).type); // whitespace after = is re-scanned
 }
