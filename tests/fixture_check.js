@@ -133,9 +133,16 @@ if (version !== "v0.1") {
     }
   }
   for (const f of sizeFiles) {
-    const sizes = JSON.parse(fs.readFileSync(path.join(dir, f), "utf8"));
-    if (sizes.total > 64 * 1024) {
-      console.error(`FAIL size golden: ${f} total ${sizes.total} B > 64 KB`);
+    let sizes;
+    try {
+      sizes = JSON.parse(fs.readFileSync(path.join(dir, f), "utf8"));
+    } catch (e) {
+      console.error(`FAIL size golden: ${f}: invalid JSON (${e.message})`);
+      failures++;
+      continue;
+    }
+    if (typeof sizes.total !== "number" || !Number.isInteger(sizes.total) || sizes.total > 64 * 1024) {
+      console.error(`FAIL size golden: ${f} total ${JSON.stringify(sizes.total)} invalid or > 64 KB`);
       failures++;
     }
   }
