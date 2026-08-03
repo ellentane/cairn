@@ -18,7 +18,6 @@ const MarkdownParser = struct {
     html: std.ArrayList(u8),
     para: std.ArrayList([]const u8),
     list: std.ArrayList([]const u8),
-    in_pre: bool,
     dsl: ?[]const u8,
     dsl_line_offset: u32,
     title: ?[]const u8,
@@ -68,7 +67,7 @@ const MarkdownParser = struct {
             if (self.dsl != null) return error.MultipleCairnBlocks;
             self.dsl_line_offset = line_no + 1; // first DSL line inside the fence
             var buf: std.ArrayList(u8) = .empty;
-            errdefer buf.deinit(self.allocator);
+            defer buf.deinit(self.allocator);
             var closed = false;
             while (lines.next()) |line| {
                 if (std.mem.startsWith(u8, line, "```")) {
@@ -82,17 +81,17 @@ const MarkdownParser = struct {
             self.dsl = try self.allocator.dupe(u8, buf.items);
             return;
         }
-        self.in_pre = true;
         try self.html.appendSlice(self.allocator, "<pre><code>");
         while (lines.next()) |line| {
             if (std.mem.startsWith(u8, line, "```")) {
-                self.in_pre = false;
                 try self.html.appendSlice(self.allocator, "</code></pre>\n");
                 return;
             }
             try appendEscaped(self.allocator, &self.html, line);
             try self.html.append(self.allocator, '\n');
         }
+        // EOF without a closing fence: close the code block anyway
+        try self.html.appendSlice(self.allocator, "</code></pre>\n");
     }
 };
 
@@ -112,6 +111,7 @@ fn appendEscaped(allocator: std.mem.Allocator, buf: *std.ArrayList(u8), s: []con
         '&' => try buf.appendSlice(allocator, "&amp;"),
         '<' => try buf.appendSlice(allocator, "&lt;"),
         '>' => try buf.appendSlice(allocator, "&gt;"),
+        '"' => try buf.appendSlice(allocator, "&quot;"),
         else => try buf.append(allocator, c),
     };
 }
@@ -140,6 +140,9 @@ fn renderInline(allocator: std.mem.Allocator, buf: *std.ArrayList(u8), text: []c
                 continue;
             }
         }
+        // limitation (v0.1): the scanner is linear, so nested emphasis like
+        // *a **b** c* does not nest — the inner ** closes the <em>; proper
+        // nesting would require a recursive-delimiter rewrite (out of scope)
         if (c == '*') {
             const rest = text[i + 1 ..];
             if (std.mem.indexOfScalar(u8, rest, '*')) |end| {
@@ -168,7 +171,6 @@ fn renderInline(allocator: std.mem.Allocator, buf: *std.ArrayList(u8), text: []c
         }
         switch (c) {
             '&' => try buf.appendSlice(allocator, "&amp;"),
-            '<' => try buf.appendSlice(allocator, "&lt;"),
             '>' => try buf.appendSlice(allocator, "&gt;"),
             else => try buf.append(allocator, c),
         }
@@ -182,12 +184,15 @@ pub fn renderAll(allocator: std.mem.Allocator, src: []const u8) MarkdownError!Re
         .html = .empty,
         .para = .empty,
         .list = .empty,
-        .in_pre = false,
         .dsl = null,
         .dsl_line_offset = 0,
         .title = null,
     };
+    defer p.para.deinit(allocator);
+    defer p.list.deinit(allocator);
     errdefer p.html.deinit(allocator);
+    errdefer if (p.dsl) |d| allocator.free(d);
+    errdefer if (p.title) |t| allocator.free(t);
 
     var lines = std.mem.splitScalar(u8, src, '\n');
     var line_no: u32 = 0;
@@ -250,6 +255,7 @@ pub fn renderAll(allocator: std.mem.Allocator, src: []const u8) MarkdownError!Re
 const expectEqual = std.testing.expectEqual;
 const expectEqualStrings = std.testing.expectEqualStrings;
 const expectError = std.testing.expectError;
+const expect = std.testing.expect;
 
 fn renderWith(src: []const u8) !markdown.RenderResult {
     // arena intentionally leaked (page_allocator); deinit would free the result
@@ -298,4 +304,33 @@ test "h2 through h6 headings" {
     const r = try renderWith("## sub\n\n### mid\n\n###### six\n");
     try expectEqualStrings("<h2>sub</h2>\n<h3>mid</h3>\n<h6>six</h6>\n", r.html);
     try expectEqual(@as(?[]const u8, null), r.title); // h1 only sets title
+}
+
+test "href quotes are escaped" {
+    const r = try renderWith("[x](a\"b)\n");
+    try expect(std.mem.indexOf(u8, r.html, "a&quot;b") != null);
+    try expect(std.mem.indexOf(u8, r.html, "a\"b") == null);
+}
+
+test "unterminated fence closes at EOF" {
+    const r = try renderWith("```js\nif (a) {}");
+    try expectEqualStrings("<pre><code>if (a) {}\n</code></pre>\n", r.html);
+}
+
+test "em/strong nesting is a documented limitation" {
+    const r = try renderWith("*a **b** c*\n");
+    // pin current behavior: inner ** does not nest inside <em> (v0.1 scope)
+    try expectEqualStrings("<p><em>a </em><em>b</em><em> c</em></p>\n", r.html);
+}
+
+test "plain ampersand is escaped" {
+    const r = try renderWith("a & b\n");
+    try expectEqualStrings("<p>a &amp; b</p>\n", r.html);
+}
+
+test "empty document" {
+    const r = try renderWith("");
+    try expectEqualStrings("", r.html);
+    try expectEqual(@as(?[]const u8, null), r.title);
+    try expectEqual(@as(?[]const u8, null), r.dsl);
 }
