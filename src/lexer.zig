@@ -20,6 +20,8 @@ pub const Token = struct {
 
 pub const LexError = error{ UnterminatedString, InvalidCharacter };
 
+/// Error positions (err_line/err_col): invalid characters point at the
+/// offending character; unterminated strings point at the string start.
 pub const Lexer = struct {
     src: []const u8,
     pos: usize = 0,
@@ -48,16 +50,19 @@ pub const Lexer = struct {
                     self.line_start = self.pos;
                 },
                 '{' => {
+                    const start_col = self.col();
                     self.pos += 1;
-                    return .{ .type = .lbrace, .text = "{", .line = self.line, .col = self.col() - 1 };
+                    return .{ .type = .lbrace, .text = "{", .line = self.line, .col = start_col };
                 },
                 '}' => {
+                    const start_col = self.col();
                     self.pos += 1;
-                    return .{ .type = .rbrace, .text = "}", .line = self.line, .col = self.col() - 1 };
+                    return .{ .type = .rbrace, .text = "}", .line = self.line, .col = start_col };
                 },
                 ';' => {
+                    const start_col = self.col();
                     self.pos += 1;
-                    return .{ .type = .semicolon, .text = ";", .line = self.line, .col = self.col() - 1 };
+                    return .{ .type = .semicolon, .text = ";", .line = self.line, .col = start_col };
                 },
                 '=' => {
                     if (self.pos + 1 >= self.src.len or self.src[self.pos + 1] != '=') {
@@ -106,9 +111,10 @@ pub const Lexer = struct {
                     return .{ .type = .string, .text = text, .line = l, .col = c };
                 },
                 '\\' => {
-                    if (self.pos + 1 >= self.src.len) break;
+                    if (self.pos + 1 >= self.src.len or self.src[self.pos + 1] == '\n') return error.UnterminatedString;
                     self.pos += 2;
                 },
+                '\n' => return error.UnterminatedString,
                 else => self.pos += 1,
             }
         }
@@ -166,4 +172,43 @@ test "invalid character" {
     var lx = Lexer{ .src = "on @" };
     _ = try lx.next();
     try expectError(error.InvalidCharacter, lx.next());
+}
+
+test "newline inside string is unterminated" {
+    var lx = Lexer{ .src = "on \"a\nb\"" };
+    _ = try lx.next();
+    try expectError(error.UnterminatedString, lx.next());
+    try expectEqual(@as(u32, 1), lx.err_line);
+    try expectEqual(@as(u32, 4), lx.err_col);
+}
+
+test "escaped newline inside string is unterminated" {
+    var lx = Lexer{ .src = "on \"a\\\nb\"" };
+    _ = try lx.next();
+    try expectError(error.UnterminatedString, lx.next());
+    try expectEqual(@as(u32, 1), lx.err_line);
+    try expectEqual(@as(u32, 4), lx.err_col);
+}
+
+test "escaped quote does not end the string" {
+    var lx = Lexer{ .src = "\"a\\\"b\"" };
+    const t = try lx.next();
+    try expectEqualStrings("a\\\"b", t.text);
+    try expectEqual(.eof, (try lx.next()).type);
+}
+
+test "CRLF line counting" {
+    var lx = Lexer{ .src = "on\r\nclick" };
+    _ = try lx.next();
+    const t = try lx.next();
+    try expectEqual(@as(u32, 2), t.line);
+    try expectEqual(@as(u32, 1), t.col);
+}
+
+test "lone equals error position" {
+    var lx = Lexer{ .src = "on =" };
+    _ = try lx.next();
+    try expectError(error.InvalidCharacter, lx.next());
+    try expectEqual(@as(u32, 1), lx.err_line);
+    try expectEqual(@as(u32, 4), lx.err_col);
 }
