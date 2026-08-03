@@ -4,6 +4,9 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
+echo "== build =="
+zig build
+
 echo "== zig build test =="
 zig build test
 
@@ -36,8 +39,8 @@ else:
     assert m, "no cairnBoot literal"
     print(re.sub(r"\s+", " ", m.group(1)))
 PY
-  if diff <(tr -d ' ' < "tests/fixtures/v0.1/$name.bin") \
-          <(tr -d ' ' < "/tmp/opencode/fixtures/$name.got.bin") > /dev/null; then
+  if diff <(tr -d ' \n' < "tests/fixtures/v0.1/$name.bin") \
+          <(tr -d ' \n' < "/tmp/opencode/fixtures/$name.got.bin") > /dev/null; then
     echo "PASS $name round-trip"
   else
     echo "FAIL $name round-trip: compiled bytecode differs from fixture" >&2
