@@ -9,10 +9,13 @@ const PAYLOAD = { 1:"str", 2:"str", 4:"str", 5:"str", 6:"str", 7:"str", 8:"str+a
   9:"addr", 11:"str", 12:"str", 14:"addr" };
 
 function strAt(bytes, i) {
+  if (i + 2 > bytes.length) throw new Error("truncated bytecode @" + i);
   const n = bytes[i] | (bytes[i + 1] << 8);
+  if (i + 2 + n > bytes.length) throw new Error("truncated string @" + i);
   return { s: new TextDecoder().decode(bytes.subarray(i + 2, i + 2 + n)), next: i + 2 + n };
 }
 function addrAt(bytes, i) {
+  if (i + 2 > bytes.length) throw new Error("truncated bytecode @" + i);
   return { a: bytes[i] | (bytes[i + 1] << 8), next: i + 2 };
 }
 function decode(bytes) {
@@ -55,6 +58,7 @@ class Asm {
     for (const [pos, name] of this.patches) {
       const v = this.labels[name];
       if (v === undefined) throw new Error("undefined label: " + name);
+      if (v > 0xFFFF) throw new Error("label too large: " + name);
       this.bc[pos] = v & 255;
       this.bc[pos + 1] = (v >> 8) & 255;
     }

@@ -38,7 +38,6 @@ for (const f of fs.readdirSync(dir).filter((x) => x.endsWith(".bin")).sort()) {
       const m = /```cairn\n([\s\S]*?)\n```/.exec(mdText);
       if (!m || m[1] !== expected.dsl) {
         console.error(`FAIL ${name}: dsl does not match the .md cairn block`);
-        failures++;
         ok = false;
       }
     }
@@ -53,7 +52,7 @@ for (const f of fs.readdirSync(dir).filter((x) => x.endsWith(".bin")).sort()) {
       if (it.addr > len) { console.error(`FAIL ${name}: ${it.name}@${it.pos} addr ${it.addr} past end`); ok = false; continue; }
       if (it.addr === len) continue; // end-of-stream termination is legal
       if (!boundaries.has(it.addr)) { console.error(`FAIL ${name}: ${it.name}@${it.pos} addr ${it.addr} not on boundary`); ok = false; }
-      if (it.name === "ON_EVENT" && it.addr <= halt.pos) { console.error(`FAIL ${name}: ON_EVENT addr in prologue`); ok = false; }
+      if ((it.name === "ON_EVENT" || it.name === "JUMP" || it.name === "JMP_IF_FALSE") && it.addr <= halt.pos) { console.error(`FAIL ${name}: ${it.name} addr in prologue`); ok = false; }
     }
     if (!ALLOWED["v0.1"].has(it.op)) { console.error(`FAIL ${name}: opcode 0x${it.op.toString(16)} not allowed in v0.1`); ok = false; }
   }

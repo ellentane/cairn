@@ -5,7 +5,7 @@ function cairnBoot(bytes, doc) {
   doc = doc || (typeof document !== "undefined" ? document : null);
   var B = Uint8Array.from(bytes);
   var S = [];
-  var st = {};
+  var st = Object.create(null);
   var ip = 0;
   var depth = 0;
   var steps = 0;
