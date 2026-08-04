@@ -33,6 +33,9 @@ node tests/vm_test.js --from-file index.html
 echo "== wasm equivalence =="
 node tests/wasm_equiv.js
 
+echo "== wasm equivalence opcode coverage =="
+node tests/wasm_equiv.js --check-ops
+
 echo "== audio round-trip =="
 node tests/audio_test.js
 

@@ -14,6 +14,8 @@ const bc = require("./bytecode.js");
 
 const OP = bc.OPCODES;
 
+const LONG_TEXT = "the quick brown fox jumps over the lazy dog";
+
 function MockClassList(node) { this.node = node; this.set = new Set(); }
 MockClassList.prototype.add = function (c) { this.set.add(c); };
 MockClassList.prototype.remove = function (c) { this.set.delete(c); };
@@ -283,11 +285,17 @@ scenario("6: while + comparators + extract_value + set_text(expr)", () => new bc
   .byte(OP.PUSH_SELECTOR).str("#out").byte(OP.GET_NODES).byte(OP.SET_TEXT_POP)
   .byte(OP.PUSH_VAR).str("v").byte(OP.PUSH_STR).str("1").byte(OP.ADD_NUM)
   .byte(OP.PUSH_SELECTOR).str("#res").byte(OP.GET_NODES).byte(OP.SET_TEXT_POP)
+  .byte(OP.PUSH_SELECTOR).str("#longsrc").byte(OP.GET_NODES).byte(OP.EXTRACT_TEXT).str("long")
+  .byte(OP.PUSH_VAR).str("long")
+  .byte(OP.PUSH_SELECTOR).str("#longout").byte(OP.GET_NODES).byte(OP.SET_TEXT_POP)
   .byte(OP.HALT).finish(),
   (f, progs) => {
     const [prog] = progs;
-    const [dj, dw] = makePair(["btn", "mid", "out", "res", "inp", "ge", "le", "gt", "ne"],
-      (a, b) => { a.nodes.inp.value = "7"; b.nodes.inp.value = "7"; });
+    const [dj, dw] = makePair(["btn", "mid", "out", "res", "inp", "ge", "le", "gt", "ne", "longsrc", "longout"],
+      (a, b) => {
+        a.nodes.inp.value = "7"; b.nodes.inp.value = "7";
+        a.nodes.longsrc.textContent = LONG_TEXT; b.nodes.longsrc.textContent = LONG_TEXT;
+      });
     bootBoth(f, "S6", prog, dj, dw);
     step(f, "S6 boot", dj, dw);
     fireBoth(f, "S6 click #btn (inp=7)", dj, dw, "btn", "click");
@@ -299,6 +307,8 @@ scenario("6: while + comparators + extract_value + set_text(expr)", () => new bc
     expectEq(f, "S6 #le (v<=5)", dj.nodes.le.textContent, "le-fail");
     expectEq(f, "S6 #gt (v>5)", dj.nodes.gt.textContent, "gt-ok");
     expectEq(f, "S6 #ne (v!=7)", dj.nodes.ne.textContent, "ne-ok");
+    expectEq(f, "S6 #longout (full " + LONG_TEXT.length + " chars)", dj.nodes.longout.textContent, LONG_TEXT);
+    expectEq(f, "S6 #longout wasm", dw.nodes.longout.textContent, LONG_TEXT);
     dj.nodes.inp.value = "2";
     dw.nodes.inp.value = "2";
     fireBoth(f, "S6 click #btn (inp=2)", dj, dw, "btn", "click");
@@ -310,6 +320,7 @@ scenario("6: while + comparators + extract_value + set_text(expr)", () => new bc
     expectEq(f, "S6 #le (v<=5)", dj.nodes.le.textContent, "le-ok");
     expectEq(f, "S6 #gt (v>5)", dj.nodes.gt.textContent, "gt-fail");
     expectEq(f, "S6 #ne (v!=7)", dj.nodes.ne.textContent, "ne-fail");
+    expectEq(f, "S6 #longout (2nd) wasm", dw.nodes.longout.textContent, LONG_TEXT);
   });
 
 // 7. formatter alignment (§5.2): 0.1 + 0.2 must render the same decimal in

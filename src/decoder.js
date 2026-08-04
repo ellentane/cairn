@@ -68,7 +68,7 @@
     const bytes = bitsToBytes(demodulate(samples));
     const pre = PREAMBLE_LEN;
     if (pre + 4 + 4 > bytes.length) throw new Error("frame truncated");
-    const len = bytes[pre] | (bytes[pre + 1] << 8) | (bytes[pre + 2] << 16) | (bytes[pre + 3] << 24);
+    const len = (bytes[pre] | (bytes[pre + 1] << 8) | (bytes[pre + 2] << 16) | (bytes[pre + 3] << 24)) >>> 0;
     if (pre + 4 + len + 4 > bytes.length) throw new Error("frame truncated");
     const payload = bytes.slice(pre + 4, pre + 4 + len);
     const crc = (bytes[pre + 4 + len] | (bytes[pre + 5 + len] << 8) |
