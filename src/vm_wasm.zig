@@ -6,9 +6,9 @@
 //   0x0014        context stack: 32 x {ip:u32, sp:u32} = 256 bytes (0x14..0x114)
 //   0x1000        bytecode region (8 KiB)
 //   0x3000        operand stack: 256 x {ptr:u32, len:u32} = 2 KiB (0x3000..0x37FF)
-//   0x3800        state table: 64 x {name[32], val[32]} = 4 KiB (0x3800..0x47FF)
-//   0x4800        scratch region (2 KiB, bump-allocated per run)
-//   0x5000        end of memory
+//   0x3800        state table: 64 x {name[32], val[256]} = 18 KiB (0x3800..0x7FFF)
+//   0x8000        scratch region (2 KiB, bump-allocated per run)
+//   0x8800        end of memory
 
 const std = @import("std");
 
@@ -20,7 +20,7 @@ extern fn dom_get_text(handle: u32, op: u32, dest_ptr: u32, dest_cap: u32) u32;
 extern fn dom_on(handle: u32, ptr: u32, len: u32, addr: u32) void;
 
 // ---- memory ----
-const MEM_SIZE = 0x5000;
+const MEM_SIZE = 0x8800;
 var mem: [MEM_SIZE]u8 = undefined;
 const BYTECODE_OFF = 0x1000;
 const STACK_OFF = 0x3000;
@@ -28,8 +28,8 @@ const STACK_ENTRIES = 256;
 const STATE_OFF = 0x3800;
 const STATE_ENTRIES = 64;
 const NAME_CAP = 32;
-const VAL_CAP = 32;
-const SCRATCH_OFF = 0x4800;
+const VAL_CAP = 256;
+const SCRATCH_OFF = 0x8000;
 const SCRATCH_CAP = 0x800;
 const MAX_DEPTH = 32;
 const MAX_STEPS = 1000000;
@@ -60,14 +60,16 @@ fn base() u32 {
     return @intFromPtr(&mem);
 }
 
-fn u16At(pos: u32) u32 {
+fn u16At(pos: u32) ?u32 {
+    if (pos + 1 >= bytecode_len) return null;
     const p = BYTECODE_OFF + pos;
     return @as(u32, mem[p]) | (@as(u32, mem[p + 1]) << 8);
 }
 
-fn strPayload(pos: *u32) struct { ptr: u32, len: u32 } {
-    const n = u16At(pos.*);
+fn strPayload(pos: *u32) ?struct { ptr: u32, len: u32 } {
+    const n = u16At(pos.*) orelse return null;
     pos.* += 2;
+    if (pos.* + n > bytecode_len) return null;
     const rel = pos.*;
     pos.* += n;
     return .{ .ptr = BYTECODE_OFF + rel, .len = n };
@@ -172,8 +174,8 @@ fn stateLoad(name: []const u8) []const u8 {
     return "";
 }
 
-fn getStr() []const u8 {
-    const p = strPayload(&ip);
+fn getStr() ?[]const u8 {
+    const p = strPayload(&ip) orelse return null;
     return memSlice(p.ptr, p.len);
 }
 
@@ -205,7 +207,7 @@ fn run(entry: u32) u32 {
         ip += 1;
         switch (op) {
             1, 2 => { // PUSH_STR / PUSH_SELECTOR
-                const s = strPayload(&ip);
+                const s = strPayload(&ip) orelse { err = ERR_OPCODE; break; };
                 if (!push(s.ptr, s.len)) { err = ERR_OPCODE; break; }
             },
             3 => { // GET_NODES
@@ -213,30 +215,30 @@ fn run(entry: u32) u32 {
                 cur_sel = dom_query(base() + sel.ptr, sel.len);
             },
             4, 5, 6 => { // ADD/REMOVE/TOGGLE_CLASS
-                const cls = strPayload(&ip);
+                const cls = strPayload(&ip) orelse { err = ERR_OPCODE; break; };
                 dom_apply_class(cur_sel, op - 4, base() + cls.ptr, cls.len);
             },
             7 => { // SET_TEXT
-                const t = strPayload(&ip);
+                const t = strPayload(&ip) orelse { err = ERR_OPCODE; break; };
                 dom_set_text(cur_sel, base() + t.ptr, t.len);
             },
             8 => { // ON_EVENT
-                const ev = strPayload(&ip);
-                const addr = u16At(ip);
+                const ev = strPayload(&ip) orelse { err = ERR_OPCODE; break; };
+                const addr = u16At(ip) orelse { err = ERR_OPCODE; break; };
                 ip += 2;
                 dom_on(cur_sel, base() + ev.ptr, ev.len, addr);
             },
-            9 => ip = u16At(ip), // JUMP
+            9 => ip = u16At(ip) orelse { err = ERR_OPCODE; break; }, // JUMP
             10 => break, // HALT
             11, 27 => { // EXTRACT_TEXT / EXTRACT_VALUE
-                const name = strPayload(&ip);
+                const name = strPayload(&ip) orelse { err = ERR_OPCODE; break; };
                 const cap = VAL_CAP - 1;
                 const dest = scratchAlloc(cap) orelse { err = ERR_OPCODE; break; };
                 const n = dom_get_text(cur_sel, if (op == 11) 0 else 1, base() + dest, cap);
                 stateStore(memSlice(name.ptr, name.len), memSlice(dest, n));
             },
             12 => { // PUSH_VAR
-                const v = getStr();
+                const v = getStr() orelse { err = ERR_OPCODE; break; };
                 if (stateFind(v)) |idx| {
                     const b_ = STATE_OFF + idx * (NAME_CAP + VAL_CAP);
                     const stored = memSlice(b_ + NAME_CAP, VAL_CAP);
@@ -254,21 +256,22 @@ fn run(entry: u32) u32 {
                 if (!pushU8(res)) { err = ERR_OPCODE; break; }
             },
             14 => { // JMP_IF_FALSE
-                const target = u16At(ip);
+                const target = u16At(ip) orelse { err = ERR_OPCODE; break; };
                 ip += 2;
                 const v = popByte();
                 if (v == 0) ip = target;
             },
             15 => { // STORE_VAR
-                const v = getStr();
+                const v = getStr() orelse { err = ERR_OPCODE; break; };
                 const val = pop();
                 stateStore(v, memSlice(val.ptr, val.len));
             },
             16 => { // INC
-                const v = getStr();
+                const v = getStr() orelse { err = ERR_OPCODE; break; };
                 const cur = stateLoad(v);
                 if (!isNum(cur)) { err = ERR_NONNUM; break; }
                 const x = std.fmt.parseFloat(f64, cur) catch { err = ERR_NONNUM; break; };
+                if (!std.math.isFinite(x + 1)) { err = ERR_NONNUM; break; }
                 var tmp: [64]u8 = undefined;
                 const n = fmtFloat(x + 1, &tmp);
                 stateStore(v, tmp[0..n]);
@@ -280,6 +283,7 @@ fn run(entry: u32) u32 {
                 const bs = memSlice(b.ptr, b.len);
                 if (binNum(as, bs)) |x| {
                     const y = std.fmt.parseFloat(f64, bs) catch 0;
+                    if (!std.math.isFinite(x + y)) { err = ERR_NONNUM; break; }
                     var tmp: [64]u8 = undefined;
                     const n = fmtFloat(x + y, &tmp);
                     const p = scratchWrite(tmp[0..n]) orelse { err = ERR_OPCODE; break; };
@@ -295,6 +299,7 @@ fn run(entry: u32) u32 {
                 const a = pop();
                 if (binNum(memSlice(a.ptr, a.len), memSlice(b.ptr, b.len))) |x| {
                     const y = std.fmt.parseFloat(f64, memSlice(b.ptr, b.len)) catch 0;
+                    if (!std.math.isFinite(x - y)) { err = ERR_NONNUM; break; }
                     var tmp: [64]u8 = undefined;
                     const n = fmtFloat(x - y, &tmp);
                     const p = scratchWrite(tmp[0..n]) orelse { err = ERR_OPCODE; break; };
@@ -328,7 +333,7 @@ fn run(entry: u32) u32 {
                 if (!pushU8(res)) { err = ERR_OPCODE; break; }
             },
             25 => { // JMP_IF_TRUE
-                const target = u16At(ip);
+                const target = u16At(ip) orelse { err = ERR_OPCODE; break; };
                 ip += 2;
                 if (popByte() != 0) ip = target;
             },
