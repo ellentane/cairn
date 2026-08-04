@@ -138,6 +138,15 @@ fn renderPage(arena: std.mem.Allocator, io: std.Io, source: []const u8, diag_pat
     if (opts.strict_format) {
         bytecode = try std.fmt.allocPrint(arena, "\x00\x01{s}", .{bytecode});
     }
+    // --vm wasm: the wasm backend's bytecode region is 8 KiB (the glue strips
+    // the format prefix before its length check, so mirror that here)
+    if (opts.vm == .wasm) {
+        var wasm_bytecode_len = bytecode.len;
+        if (wasm_bytecode_len >= 2 and bytecode[0] == 0 and bytecode[1] == 1) wasm_bytecode_len -= 2;
+        if (wasm_bytecode_len > 0x2000) {
+            std.debug.print("cairn: warning: bytecode is {d} bytes — exceeds the wasm VM's 8 KiB region; page will fall back to the JS VM\n", .{wasm_bytecode_len});
+        }
+    }
     var wasm_b64: ?[]const u8 = null;
     if (opts.vm == .wasm) {
         const wasm = std.Io.Dir.cwd().readFileAlloc(io, "zig-out/bin/vm_wasm.wasm", arena, .limited(1 << 24)) catch

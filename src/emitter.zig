@@ -362,6 +362,16 @@ test "wasm vm mode respects debug_encoding transport" {
     try expect(std.mem.indexOf(u8, page.html, "__BYTES = Uint8Array.from(atob(") == null);
 }
 
+test "wasm vm mode: strict-format prefix + debug-encoding transport is slice-safe" {
+    // 0x00 0x01 prefix + decimal Array transport: the glue must strip the
+    // prefix with slice (Array has no subarray — a subarray call would throw
+    // and silently fall back to the JS VM)
+    const page = try buildWasm("", &[_]u8{ 0x00, 0x01, 0x0A }, "T", true);
+    try expect(std.mem.indexOf(u8, page.html, "var __BYTES = [0, 1, 10];") != null);
+    try expect(std.mem.indexOf(u8, page.html, "bytecode = bytecode.slice(2);") != null);
+    try expect(std.mem.indexOf(u8, page.html, "bytecode = bytecode.subarray(2);") == null);
+}
+
 test "wasm vm mode requires the wasm blob" {
     var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     try expectError(error.MissingWasm, emitter.build(arena.allocator(), .{ .content = "", .bytecode = &[_]u8{0x0A}, .title = "T", .vm = .wasm }));

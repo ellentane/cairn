@@ -55,7 +55,9 @@ function cairnBootWasm(wasmBytes, bytecode, doc) {
   // otherwise opcode 0x00 hits ERR_OPCODE and the wasm backend silently falls back
   if (bytecode.length > 0 && bytecode[0] === 0) {
     if (bytecode.length < 2 || bytecode[1] !== 1) throw new Error("UnsupportedFormat");
-    bytecode = bytecode.subarray(2);
+    // slice, not subarray: with --debug-encoding the transport is a plain Array
+    // (no subarray method); slice works for both Array and Uint8Array
+    bytecode = bytecode.slice(2);
   }
   instance = new WebAssembly.Instance(new WebAssembly.Module(wasmBytes), imports);
   var base = instance.exports.mem_base();
