@@ -11,6 +11,12 @@ function check(name, cond) {
   else { failures++; console.error("FAIL " + name); }
 }
 
+// 0. clean slate: decode.html generation is only-if-absent, so a stale file
+// from an earlier run would make the existence check pass vacuously
+for (const p of ["/tmp/cairn-audio-page.html", "/tmp/cairn-audio-site.wav", "/tmp/cairn-audio-decode.html", "/tmp/decode.html"]) {
+  fs.rmSync(p, { force: true });
+}
+
 // 1. CRC vector
 check("crc32 iso-hdlc vector", crc32(new TextEncoder().encode("123456789")) === 0xCBF43926);
 

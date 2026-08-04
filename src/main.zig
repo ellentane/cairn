@@ -186,11 +186,14 @@ fn buildDecodeHtml(arena: std.mem.Allocator) ![]const u8 {
     var buf: std.ArrayList(u8) = .empty;
     defer buf.deinit(arena);
     var rest: []const u8 = decode_html_tpl;
+    var replaced: usize = 0;
     while (std.mem.indexOf(u8, rest, needle)) |idx| {
         try buf.appendSlice(arena, rest[0..idx]);
         try buf.appendSlice(arena, decoder_js);
         rest = rest[idx + needle.len ..];
+        replaced += 1;
     }
+    if (replaced == 0) fatal("decode.html template missing /*__CAIRN_DECODER__*/ placeholder", .{});
     try buf.appendSlice(arena, rest);
     return buf.toOwnedSlice(arena);
 }
@@ -219,12 +222,13 @@ fn buildSource(arena: std.mem.Allocator, io: std.Io, source: []const u8, base_di
         std.debug.print("cairn: wrote {s} ({d} samples, {d} bytes)\n", .{ audio_path, (wav.len - 44) / 2, wav.len });
         const decode_dir = std.fs.path.dirname(audio_path) orelse ".";
         const decode_path = try std.fmt.allocPrint(arena, "{s}/decode.html", .{decode_dir});
-        var decode_exists = false;
-        if (std.Io.Dir.cwd().openFile(io, decode_path, .{})) |f| {
+        const existing = std.Io.Dir.cwd().openFile(io, decode_path, .{}) catch |e| switch (e) {
+            error.FileNotFound => null,
+            else => return e,
+        };
+        if (existing) |f| {
             f.close(io);
-            decode_exists = true;
-        } else |_| {}
-        if (!decode_exists) {
+        } else {
             std.Io.Dir.cwd().writeFile(io, .{ .sub_path = decode_path, .data = try buildDecodeHtml(arena) }) catch |e| {
                 fatal("cannot write {s}: {s}", .{ decode_path, @errorName(e) });
             };

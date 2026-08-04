@@ -33,6 +33,9 @@ node tests/vm_test.js --from-file index.html
 echo "== wasm equivalence =="
 node tests/wasm_equiv.js
 
+echo "== audio round-trip =="
+node tests/audio_test.js
+
 echo "== last box (Node smoke) =="
 node tests/showcase_smoke.js index.html
 
