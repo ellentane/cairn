@@ -5,6 +5,12 @@ const compiler = @import("compiler.zig");
 const emitter = @import("emitter.zig");
 const audio = @import("audio.zig");
 
+// decode.html companion: template plus the inlined decoder source
+// (src/decode.html.tpl is a symlink to tools/decode.html.tpl — Zig's
+// @embedFile rejects "../" paths, so the link keeps the template canonical)
+const decode_html_tpl = @embedFile("decode.html.tpl");
+const decoder_js = @embedFile("decoder.js");
+
 const max_input: usize = 1 << 20;
 
 const Options = struct {
@@ -175,6 +181,20 @@ fn renderPage(arena: std.mem.Allocator, io: std.Io, source: []const u8, diag_pat
     };
 }
 
+fn buildDecodeHtml(arena: std.mem.Allocator) ![]const u8 {
+    const needle = "/*__CAIRN_DECODER__*/";
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(arena);
+    var rest: []const u8 = decode_html_tpl;
+    while (std.mem.indexOf(u8, rest, needle)) |idx| {
+        try buf.appendSlice(arena, rest[0..idx]);
+        try buf.appendSlice(arena, decoder_js);
+        rest = rest[idx + needle.len ..];
+    }
+    try buf.appendSlice(arena, rest);
+    return buf.toOwnedSlice(arena);
+}
+
 fn buildSource(arena: std.mem.Allocator, io: std.Io, source: []const u8, base_dir: ?[]const u8, input_path: []const u8, opts: Options) !void {
     const out = try renderPage(arena, io, source, input_path, base_dir, opts);
     if (opts.budget) |budget| {
@@ -197,6 +217,19 @@ fn buildSource(arena: std.mem.Allocator, io: std.Io, source: []const u8, base_di
             fatal("cannot write {s}: {s}", .{ audio_path, @errorName(e) });
         };
         std.debug.print("cairn: wrote {s} ({d} samples, {d} bytes)\n", .{ audio_path, (wav.len - 44) / 2, wav.len });
+        const decode_dir = std.fs.path.dirname(audio_path) orelse ".";
+        const decode_path = try std.fmt.allocPrint(arena, "{s}/decode.html", .{decode_dir});
+        var decode_exists = false;
+        if (std.Io.Dir.cwd().openFile(io, decode_path, .{})) |f| {
+            f.close(io);
+            decode_exists = true;
+        } else |_| {}
+        if (!decode_exists) {
+            std.Io.Dir.cwd().writeFile(io, .{ .sub_path = decode_path, .data = try buildDecodeHtml(arena) }) catch |e| {
+                fatal("cannot write {s}: {s}", .{ decode_path, @errorName(e) });
+            };
+            std.debug.print("cairn: wrote {s}\n", .{decode_path});
+        }
     }
 }
 

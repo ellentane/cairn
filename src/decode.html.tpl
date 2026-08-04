@@ -1,0 +1,1 @@
+../tools/decode.html.tpl
