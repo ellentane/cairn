@@ -89,7 +89,7 @@ pre{background:#f4f4f4;padding:1em;overflow:auto;max-height:20em}
         if (micState.buffer.length >= 64 && !micState.collecting) {
           micState.collecting = true;
           setTimeout(function () {
-            var flat = new Int16Array(64 * 2048);
+            var flat = new Int16Array(micState.buffer.length * 2048);
             var k = 0;
             for (var j = 0; j < micState.buffer.length; j++) { flat.set(micState.buffer[j], k); k += micState.buffer[j].length; }
             var bits = [];
