@@ -25,6 +25,16 @@ pub fn build(b: *std.Build) void {
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&run_tests.step);
 
+    const audio_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/audio.zig"),
+            .target = target,
+            .optimize = .Debug,
+        }),
+    });
+    const run_audio_tests = b.addRunArtifact(audio_tests);
+    test_step.dependOn(&run_audio_tests.step);
+
     const minify = b.addSystemCommand(&.{ "node", "tools/minify_vm.js" });
     const minify_step = b.step("minify", "Regenerate src/vm.min.js from src/vm.js");
     minify_step.dependOn(&minify.step);

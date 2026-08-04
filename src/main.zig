@@ -3,6 +3,7 @@ const markdown = @import("markdown.zig");
 const parser = @import("parser.zig");
 const compiler = @import("compiler.zig");
 const emitter = @import("emitter.zig");
+const audio = @import("audio.zig");
 
 const max_input: usize = 1 << 20;
 
@@ -12,6 +13,7 @@ const Options = struct {
     debug_encoding: bool = false,
     vm: emitter.Vm = .js,
     strict_format: bool = false,
+    audio: ?[]const u8 = null,
 };
 
 fn fatal(comptime fmt: []const u8, args: anytype) noreturn {
@@ -20,7 +22,7 @@ fn fatal(comptime fmt: []const u8, args: anytype) noreturn {
 }
 
 fn usage() noreturn {
-    std.debug.print("usage: cairn build <input.md|dir> [--output <file>] [--budget <kb>] [--debug-encoding] [--vm js|wasm] [--strict-format] | cairn verify <file> | cairn demo [dir] | cairn fixtures <dir>\n", .{});
+    std.debug.print("usage: cairn build <input.md|dir> [--output <file>] [--audio <out.wav>] [--budget <kb>] [--debug-encoding] [--vm js|wasm] [--strict-format] | cairn verify <file> | cairn demo [dir] | cairn fixtures <dir>\n", .{});
     std.process.exit(2);
 }
 
@@ -63,6 +65,9 @@ fn parseFlags(_: std.mem.Allocator, args: []const [:0]const u8, start: usize) !O
             } else {
                 fatal("invalid --vm value: {s} (expected js|wasm)", .{args[i + 1]});
             }
+            i += 1;
+        } else if (std.mem.eql(u8, args[i], "--audio") and i + 1 < args.len) {
+            opts.audio = args[i + 1];
             i += 1;
         } else if (std.mem.eql(u8, args[i], "--strict-format")) {
             opts.strict_format = true;
@@ -181,6 +186,18 @@ fn buildSource(arena: std.mem.Allocator, io: std.Io, source: []const u8, base_di
         fatal("cannot write {s}: {s}", .{ opts.output, @errorName(e) });
     };
     emitter.printReport(out.page.sizes, opts.output);
+    if (opts.audio) |audio_path| {
+        const page_bytes = std.Io.Dir.cwd().readFileAlloc(io, opts.output, arena, .limited(1 << 24)) catch |e|
+            fatal("cannot read back {s}: {s}", .{ opts.output, @errorName(e) });
+        const wav = audio.encode(arena, page_bytes) catch |e| switch (e) {
+            error.TooLarge => fatal("page too large for audio: cannot encode {s}", .{audio_path}),
+            error.OutOfMemory => return e,
+        };
+        std.Io.Dir.cwd().writeFile(io, .{ .sub_path = audio_path, .data = wav }) catch |e| {
+            fatal("cannot write {s}: {s}", .{ audio_path, @errorName(e) });
+        };
+        std.debug.print("cairn: wrote {s} ({d} samples, {d} bytes)\n", .{ audio_path, (wav.len - 44) / 2, wav.len });
+    }
 }
 
 fn buildOne(arena: std.mem.Allocator, io: std.Io, source: []const u8, path: []const u8, opts: Options) !void {
