@@ -14,7 +14,10 @@ function cairnBoot(bytes, doc) {
 
   if (B.length > 0 && B[0] === 0) {
     if (B.length < 2 || B[1] !== 1) throw new Error("UnsupportedFormat");
-    ip = 2;
+    // strip the version header before interpreting: the compiler patches
+    // handler addresses against the un-prefixed stream, so a plain ip=2 skip
+    // would misalign every jump (repro: UnknownOpcode at the addr-slot byte)
+    B = B.slice(2);
   }
 
   function u16() { var v = B[ip] | (B[ip + 1] << 8); ip += 2; return v; }

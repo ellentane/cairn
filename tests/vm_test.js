@@ -168,6 +168,33 @@ async function main() {
     eq(threw, "UnsupportedFormat", "unknown format version throws");
   }
 
+  // 8b. strict-format stream (0x00 0x01 header) with a jump-bearing handler:
+  //     the header must be stripped before interpreting, not skipped via ip —
+  //     handler addresses are patched against the un-prefixed stream, so an
+  //     ip=2 skip misaligns every jump (repro: UnknownOpcode at the addr byte)
+  {
+    const d = fresh();
+    const asm = new bc.Asm()
+      .byte(OP.PUSH_SELECTOR).str("#btn").byte(OP.GET_NODES).onEvent("click", "go")
+      .byte(OP.HALT)
+      .label("go")
+      .byte(OP.PUSH_STR).str("0").byte(OP.PUSH_STR).str("0").byte(OP.CMP_STR)
+      .jif("else")
+      .byte(OP.PUSH_SELECTOR).str("#out").byte(OP.GET_NODES).byte(OP.SET_TEXT).str("if-branch")
+      .jump("done")
+      .label("else")
+      .byte(OP.PUSH_SELECTOR).str("#out").byte(OP.GET_NODES).byte(OP.SET_TEXT).str("else-branch")
+      .label("done").byte(OP.HALT);
+    const prog = asm.finish();
+    boot([0, 1].concat(prog), d); // strict-format header + program
+    d.nodes.btn.fire("click");
+    eq(d.nodes.out.textContent, "if-branch", "strict-format: handler entry jump aligned");
+    d.nodes.src.textContent = "x";
+    d.nodes.out.textContent = "";
+    d.nodes.btn.fire("click");
+    eq(d.nodes.out.textContent, "if-branch", "strict-format: second handler run still aligned");
+  }
+
   // 9. unknown opcode throws loudly
   {
     const d = fresh();
