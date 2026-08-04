@@ -10,6 +10,8 @@ const Options = struct {
     output: []const u8 = "index.html",
     budget: ?usize = null,
     debug_encoding: bool = false,
+    vm: emitter.Vm = .js,
+    strict_format: bool = false,
 };
 
 fn fatal(comptime fmt: []const u8, args: anytype) noreturn {
@@ -18,7 +20,7 @@ fn fatal(comptime fmt: []const u8, args: anytype) noreturn {
 }
 
 fn usage() noreturn {
-    std.debug.print("usage: cairn build <input.md|dir> [--output <file>] [--budget <kb>] [--debug-encoding] | cairn verify <file> | cairn demo [dir] | cairn fixtures <dir>\n", .{});
+    std.debug.print("usage: cairn build <input.md|dir> [--output <file>] [--budget <kb>] [--debug-encoding] [--vm js|wasm] [--strict-format] | cairn verify <file> | cairn demo [dir] | cairn fixtures <dir>\n", .{});
     std.process.exit(2);
 }
 
@@ -53,6 +55,17 @@ fn parseFlags(_: std.mem.Allocator, args: []const [:0]const u8, start: usize) !O
             i += 1;
         } else if (std.mem.eql(u8, args[i], "--debug-encoding")) {
             opts.debug_encoding = true;
+        } else if (std.mem.eql(u8, args[i], "--vm") and i + 1 < args.len) {
+            if (std.mem.eql(u8, args[i + 1], "js")) {
+                opts.vm = .js;
+            } else if (std.mem.eql(u8, args[i + 1], "wasm")) {
+                opts.vm = .wasm;
+            } else {
+                fatal("invalid --vm value: {s} (expected js|wasm)", .{args[i + 1]});
+            }
+            i += 1;
+        } else if (std.mem.eql(u8, args[i], "--strict-format")) {
+            opts.strict_format = true;
         } else {
             fatal("unknown flag: {s}", .{args[i]});
         }
@@ -120,6 +133,20 @@ fn renderPage(arena: std.mem.Allocator, io: std.Io, source: []const u8, diag_pat
         };
         bytecode = try compiler.compile(arena, program);
     }
+    // --strict-format: prefix the versioned stream header (0x00 0x01) before
+    // emission so the bytecode bucket and page content stay consistent
+    if (opts.strict_format) {
+        bytecode = try std.fmt.allocPrint(arena, "\x00\x01{s}", .{bytecode});
+    }
+    var wasm_b64: ?[]const u8 = null;
+    if (opts.vm == .wasm) {
+        const wasm = std.Io.Dir.cwd().readFileAlloc(io, "zig-out/bin/vm_wasm.wasm", arena, .limited(1 << 24)) catch
+            fatal("run `zig build` first — missing zig-out/bin/vm_wasm.wasm", .{});
+        const enc_len = std.base64.standard.Encoder.calcSize(wasm.len);
+        const b64 = try arena.alloc(u8, enc_len);
+        _ = std.base64.standard.Encoder.encode(b64, wasm);
+        wasm_b64 = b64;
+    }
     return .{
         .page = try emitter.build(arena, .{
             .content = result.html,
@@ -127,6 +154,8 @@ fn renderPage(arena: std.mem.Allocator, io: std.Io, source: []const u8, diag_pat
             .title = result.title orelse "Cairn",
             .debug_encoding = opts.debug_encoding,
             .css = result.css,
+            .vm = opts.vm,
+            .wasm_b64 = wasm_b64,
         }),
         .bytecode = bytecode,
     };

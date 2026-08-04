@@ -1,5 +1,47 @@
 const std = @import("std");
 const vm_source = @embedFile("vm.js");
+const wasm_glue_source = @embedFile("wasm_glue.js");
+
+// --vm wasm embeds the JS VM in definition-only form (its auto-boot tail would
+// otherwise register every handler before the wasm path runs). Cut the source
+// at the first occurrence of the auto-boot marker; compile-time check keeps
+// drift in vm.js from silently double-booting wasm pages.
+const auto_boot_marker = "if (typeof document !== \"undefined\") {";
+const vm_tail_cut = blk: {
+    @setEvalBranchQuota(100000);
+    break :blk std.mem.indexOf(u8, vm_source, auto_boot_marker) orelse
+        @compileError("vm.js auto-boot tail marker not found; cannot strip it for --vm wasm");
+};
+const vm_stripped = vm_source[0..vm_tail_cut];
+
+const bootstrap_tpl =
+    \\// injected bootstrap — the SINGLE boot point for --vm wasm pages.
+    \\// The embedded JS VM source is definition-only: its auto-boot tail
+    \\// (the `if (typeof document !== "undefined") { ... cairnBoot(__CAIRN_BYTES__); }`
+    \\// block) is stripped by the emitter, so the JS VM never registers handlers
+    \\// before the wasm path runs (no double boot).
+    \\var __WASM_B64 = "BASE64_PLACEHOLDER"; // filled by the emitter
+    \\var __BYTES = TRANSPORT_PLACEHOLDER;   // filled by the emitter: the v0.3 transport
+    \\                                       // expression (Uint8Array.from(atob("..."), ...)
+    \\                                       // for base64, or the decimal array for
+    \\                                       // --debug-encoding)
+    \\function __decodeTransport() { return __BYTES; }
+    \\function __bootJs() { cairnBoot(__BYTES, document); }
+    \\function __bootWasm() {
+    \\  var wasmBytes = Uint8Array.from(atob(__WASM_B64), function (c) { return c.charCodeAt(0); });
+    \\  cairnBootWasm(wasmBytes, __BYTES, document);
+    \\}
+    \\try {
+    \\  var __hasWasm = false;
+    \\  try { __hasWasm = typeof WebAssembly !== "undefined" && typeof WebAssembly.instantiate === "function"; }
+    \\  catch (e2) { __hasWasm = false; } // a throwing WebAssembly getter counts as absent
+    \\  if (__hasWasm) __bootWasm();
+    \\  else __bootJs();
+    \\} catch (e) {
+    \\  console.error("cairn: wasm backend failed, falling back: " + e.message);
+    \\  try { __bootJs(); } catch (e2) { console.error("cairn: JS VM failed: " + e2.message); throw e2; }
+    \\}
+    ;
 
 pub const Sizes = struct {
     total: usize,
@@ -14,7 +56,7 @@ pub const Page = struct {
     sizes: Sizes,
 };
 
-pub const EmitterError = error{OutOfMemory};
+pub const EmitterError = error{ OutOfMemory, MissingWasm };
 
 const template =
     \\<!DOCTYPE html>
@@ -72,12 +114,16 @@ pub fn appendBytesLiteral(allocator: std.mem.Allocator, buf: *std.ArrayList(u8),
     }
 }
 
+pub const Vm = enum { js, wasm };
+
 pub fn build(allocator: std.mem.Allocator, opts: struct {
     content: []const u8,
     bytecode: []const u8,
     title: []const u8,
     debug_encoding: bool = false,
     css: ?[]const u8 = null,
+    vm: Vm = .js,
+    wasm_b64: ?[]const u8 = null,
 }) EmitterError!Page {
     const title_escaped = try escapeTitle(allocator, opts.title);
 
@@ -102,7 +148,23 @@ pub fn build(allocator: std.mem.Allocator, opts: struct {
 
     var script: std.ArrayList(u8) = .empty;
     defer script.deinit(allocator);
-    try replaceInto(allocator, &script, vm_source, "__CAIRN_BYTES__", bytes_expr.items);
+    switch (opts.vm) {
+        .js => try replaceInto(allocator, &script, vm_source, "__CAIRN_BYTES__", bytes_expr.items),
+        .wasm => {
+            const wasm_b64 = opts.wasm_b64 orelse return error.MissingWasm;
+            try script.appendSlice(allocator, vm_stripped);
+            try script.appendSlice(allocator, "\n\n");
+            try script.appendSlice(allocator, wasm_glue_source);
+            try script.appendSlice(allocator, "\n\n");
+            var boot: std.ArrayList(u8) = .empty;
+            defer boot.deinit(allocator);
+            try replaceInto(allocator, &boot, bootstrap_tpl, "BASE64_PLACEHOLDER", wasm_b64);
+            var boot2: std.ArrayList(u8) = .empty;
+            defer boot2.deinit(allocator);
+            try replaceInto(allocator, &boot2, boot.items, "TRANSPORT_PLACEHOLDER", bytes_expr.items);
+            try script.appendSlice(allocator, boot2.items);
+        },
+    }
     const vm_len = script.items.len - bytecode_len;
 
     var staged: std.ArrayList(u8) = .empty;
@@ -173,6 +235,7 @@ fn kb(n: usize) f64 {
 const emitter = @import("emitter.zig");
 const expectEqual = std.testing.expectEqual;
 const expect = std.testing.expect;
+const expectError = std.testing.expectError;
 const expectEqualStrings = std.testing.expectEqualStrings;
 const expectEqualSlices = std.testing.expectEqualSlices;
 
@@ -184,6 +247,11 @@ fn buildWithOpts(content: []const u8, bytecode: []const u8, title: []const u8, d
     // arena intentionally leaked (page_allocator); deinit would free the page
     var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     return emitter.build(arena.allocator(), .{ .content = content, .bytecode = bytecode, .title = title, .debug_encoding = debug_encoding, .css = css });
+}
+
+fn buildWasm(content: []const u8, bytecode: []const u8, title: []const u8, debug_encoding: bool) !emitter.Page {
+    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    return emitter.build(arena.allocator(), .{ .content = content, .bytecode = bytecode, .title = title, .debug_encoding = debug_encoding, .vm = .wasm, .wasm_b64 = "AAECAw==" });
 }
 
 test "page contains doctype, title, content, bytecode, provenance, favicon" {
@@ -262,6 +330,41 @@ test "base64 transport by default" {
 test "decimal transport via options" {
     const page = try buildWithOpts("", &[_]u8{ 0x0A }, "T", true, null); // debug_encoding
     try expect(std.mem.indexOf(u8, page.html, "cairnBoot([10]);") != null);
+}
+
+test "wasm vm mode assembles glue, bootstrap, and no auto-boot tail" {
+    const page = try buildWasm("<h1>Hi</h1>", &[_]u8{ 0x02, 0x0A }, "T", false);
+    try expect(std.mem.indexOf(u8, page.html, "cairnBootWasm") != null);
+    try expect(std.mem.indexOf(u8, page.html, "var __WASM_B64 = \"AAECAw==\";") != null);
+    try expect(std.mem.indexOf(u8, page.html, "cairnBootWasm(wasmBytes, __BYTES, document);") != null);
+    // the JS VM is definition-only: auto-boot tail stripped, no double boot
+    // (the bootstrap *comment* quotes the tail; assert on the executable form)
+    try expect(std.mem.indexOf(u8, page.html, "var go = function() { cairnBoot(") == null);
+    // the strip cut after cairnBoot's closing brace: its return statement is
+    // present and the glue header immediately follows the stripped source
+    try expect(std.mem.indexOf(u8, page.html, "isNum: isNum };") != null);
+    try expect(std.mem.indexOf(u8, page.html, "// Cairn WASM VM glue").? > std.mem.indexOf(u8, page.html, "isNum: isNum };").?);
+    try expectEqual(page.sizes.total, page.html.len);
+    try expectEqual(page.sizes.total, page.sizes.shell + page.sizes.content + page.sizes.vm + page.sizes.bytecode);
+}
+
+test "wasm vm mode size accounting mirrors js mode formula" {
+    const page = try buildWasm("<p>x</p>", &[_]u8{ 0x02, 0x0A }, "T", false);
+    const page_js = try buildWith("<p>x</p>", &[_]u8{ 0x02, 0x0A }, "T");
+    try expectEqual(page_js.sizes.bytecode, page.sizes.bytecode);
+    try expect(page.sizes.vm > page_js.sizes.vm); // glue + wasm literal + bootstrap
+}
+
+test "wasm vm mode respects debug_encoding transport" {
+    const page = try buildWasm("", &[_]u8{0x0A}, "T", true);
+    try expect(std.mem.indexOf(u8, page.html, "var __BYTES = [10];") != null);
+    // no base64 transport when debug_encoding
+    try expect(std.mem.indexOf(u8, page.html, "__BYTES = Uint8Array.from(atob(") == null);
+}
+
+test "wasm vm mode requires the wasm blob" {
+    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    try expectError(error.MissingWasm, emitter.build(arena.allocator(), .{ .content = "", .bytecode = &[_]u8{0x0A}, .title = "T", .vm = .wasm }));
 }
 
 test "css injection" {
