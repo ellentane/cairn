@@ -168,7 +168,7 @@ const MarkdownParser = struct {
         if (self.title == null) self.title = try self.allocator.dupe(u8, std.mem.trim(u8, text, " \t"));
     }
 
-    fn handleFence(self: *MarkdownParser, opener: []const u8, line_no: u32, lines: *std.mem.SplitIterator(u8, .scalar)) MarkdownError!void {
+    fn handleFence(self: *MarkdownParser, opener: []const u8, line_no: u32, lines: *std.mem.SplitIterator(u8, .scalar)) MarkdownError!u32 {
         const info = std.mem.trim(u8, opener[3..], " \t");
         if (std.mem.eql(u8, info, "cairn")) {
             if (self.dsl != null) return error.MultipleCairnBlocks;
@@ -176,7 +176,9 @@ const MarkdownParser = struct {
             var buf: std.ArrayList(u8) = .empty;
             defer buf.deinit(self.allocator);
             var closed = false;
+            var consumed: u32 = 0;
             while (lines.next()) |line| {
+                consumed += 1;
                 if (std.mem.startsWith(u8, line, "```")) {
                     closed = true;
                     break;
@@ -186,23 +188,25 @@ const MarkdownParser = struct {
             }
             if (closed and buf.items.len > 0) buf.items.len -= 1;
             self.dsl = try self.allocator.dupe(u8, buf.items);
-            return;
+            return consumed;
         }
         if (std.mem.eql(u8, info, "cairn-css")) {
             if (self.css != null) return error.MultipleStyleBlocks;
             var buf: std.ArrayList(u8) = .empty;
             defer buf.deinit(self.allocator);
+            var consumed: u32 = 0;
             while (lines.next()) |line| {
+                consumed += 1;
                 if (std.mem.startsWith(u8, line, "```")) {
                     if (buf.items.len > 0) buf.items.len -= 1; // drop trailing \n
                     self.css = try self.allocator.dupe(u8, buf.items);
-                    return;
+                    return consumed;
                 }
                 try buf.appendSlice(self.allocator, line);
                 try buf.append(self.allocator, '\n');
             }
             std.debug.print("cairn: warning: unterminated cairn-css fence; css ignored\n", .{});
-            return;
+            return consumed;
         }
         // language-tagged fence (any info string)
         self.in_pre = true;
@@ -213,17 +217,20 @@ const MarkdownParser = struct {
         } else {
             try self.html.appendSlice(self.allocator, "<pre><code>");
         }
+        var consumed: u32 = 0;
         while (lines.next()) |line| {
+            consumed += 1;
             if (std.mem.startsWith(u8, line, "```")) {
                 self.in_pre = false;
                 try self.html.appendSlice(self.allocator, "</code></pre>\n");
-                return;
+                return consumed;
             }
             try appendEscaped(self.allocator, &self.html, line);
             try self.html.append(self.allocator, '\n');
         }
         self.in_pre = false;
         try self.html.appendSlice(self.allocator, "</code></pre>\n"); // unterminated fence closes at EOF
+        return consumed;
     }
 };
 
@@ -397,7 +404,7 @@ pub fn renderAll(allocator: std.mem.Allocator, io: std.Io, src: []const u8, base
         line_no += 1;
         if (std.mem.startsWith(u8, line, "```")) {
             try p.flushAll();
-            try p.handleFence(line, line_no, &lines);
+            line_no += try p.handleFence(line, line_no, &lines);
             continue;
         }
         if (line.len > 0 and line[0] == '#' and line.len > 1 and (line[1] == ' ' or line[1] == '#')) {
@@ -596,6 +603,11 @@ test "cairn-css block is extracted" {
     const r = try renderWith("text\n\n```cairn-css\nh1 { color: red; }\n```\n");
     try expectEqualStrings("h1 { color: red; }", r.css.?);
     try expect(std.mem.indexOf(u8, r.html, "cairn-css") == null);
+}
+
+test "dsl_line_offset survives a preceding fence" {
+    const r = try renderWith("text\n\n```cairn-css\na{}\n```\n\n```cairn\non click \"#b\" { }\n```\n");
+    try expectEqual(@as(u32, 8), r.dsl_line_offset); // cairn opener at line 7, first DSL line = 8
 }
 
 test "second cairn-css block errors" {

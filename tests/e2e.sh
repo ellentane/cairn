@@ -30,6 +30,9 @@ cat /tmp/opencode/cairn-report.txt
 echo "== VM behavior on built page =="
 node tests/vm_test.js --from-file index.html
 
+echo "== last box (Node smoke) =="
+node tests/showcase_smoke.js index.html
+
 echo "== fixture round-trip: CLI output must match hand-authored .bin =="
 mkdir -p /tmp/opencode/fixtures
 # V3 is excluded: v0.2 compiles its `==` to CMP_EQ (19) where the v0.1
@@ -70,7 +73,8 @@ const path = require("path");
 const src = fs.readFileSync("src/vm.js", "utf8");
 const boot = new Function(src + "\n;return cairnBoot;")();
 function MockClassList(){this.set=new Set()}
-MockClassList.prototype.add=function(c){this.set.add(c)}; MockClassList.prototype.has=function(c){return this.set.has(c)};
+MockClassList.prototype.add=function(c){this.set.add(c)}; MockClassList.prototype.remove=function(c){this.set.delete(c)};
+MockClassList.prototype.has=function(c){return this.set.has(c)};
 function MockNode(id){this.id=id;this._text="";this.value="";this.classList=new MockClassList();this.handlers={};
   Object.defineProperty(this,"textContent",{get:()=>this._text,set:(v)=>{this._text=v}})}
 MockNode.prototype.addEventListener=function(ev,fn){(this.handlers[ev]=this.handlers[ev]||[]).push(fn)};
@@ -81,27 +85,24 @@ MockDoc.prototype.querySelectorAll=function(sel){const k=sel.slice(1);return thi
 const html = fs.readFileSync("index.html","utf8");
 let prog = null;
 let mb = /cairnBoot\(Uint8Array.from\(atob\(\"([^\"]+)\"/.exec(html);
-if (mb) {
-  prog = [...Buffer.from(mb[1], "base64")];
-} else {
-  const m = /cairnBoot\(\s*\[\s*([\s\S]*?)\s*\]\s*\)/.exec(html);
-  if (m) prog = JSON.parse("[" + m[1].replace(/\s+/g," ") + "]");
-}
+if (mb) { prog = [...Buffer.from(mb[1], "base64")]; }
+else { const m = /cairnBoot\(\s*\[\s*([\s\S]*?)\s*\]\s*\)/.exec(html); if (m) prog = JSON.parse("[" + m[1].replace(/\s+/g," ") + "]"); }
 if (!prog) { console.error("FAIL: no cairnBoot literal found"); process.exit(1); }
 const d = new MockDoc();
-for (const id of ["btn","out","chk","status","box","inc","count","name"]) d.add(new MockNode(id));
-d.nodes.status.textContent = "pending";
-d.nodes.name.value = "world";
+for (const id of ["room","clock","total","left","fb","name","seal","ending","e-time","e-l1","e-name","e-final","zero","one","scratch","w-mug","w-coat","w-cassette","mem-mug","mug-btn","coat-btn","cassette-btn","row-mug","note-row"]) d.add(new MockNode(id));
+d.nodes.zero._text = "0"; d.nodes.one._text = "1";
+d.nodes["w-mug"]._text = "400"; d.nodes["w-coat"]._text = "1800"; d.nodes["w-cassette"]._text = "1200";
+d.nodes["mem-mug"]._text = "mem-mug";
 boot(prog, d);
-d.nodes.inc.fire("click");
-if (d.nodes.out.textContent !== "1 clicks") { console.error("FAIL counter 1"); process.exit(1); }
-d.nodes.inc.fire("click");
-if (d.nodes.out.textContent !== "2 clicks") { console.error("FAIL counter 2"); process.exit(1); }
-d.nodes.inc.fire("click");
-if (d.nodes.out.textContent !== "three clicks!") { console.error("FAIL counter 3 (if branch)"); process.exit(1); }
-d.nodes.name.fire("input");
-if (d.nodes.out.textContent !== "hello world") { console.error("FAIL extract_value+concat"); process.exit(1); }
-console.log("PASS example v0.2 interactions");
+d.nodes["mug-btn"].fire("click");
+if (d.nodes.total.textContent !== "400") { console.error("FAIL lastbox mug weight"); process.exit(1); }
+if (d.nodes.clock.textContent !== "5:15") { console.error("FAIL lastbox clock"); process.exit(1); }
+d.nodes.name.value = "ada";
+d.nodes["seal"].fire("click");
+if (d.nodes["e-time"].textContent !== "5:15.") { console.error("FAIL lastbox seal time"); process.exit(1); }
+if (d.nodes["e-name"].textContent !== "ada") { console.error("FAIL lastbox label name"); process.exit(1); }
+if (d.nodes["e-l1"].textContent !== "you made it with time to spare.") { console.error("FAIL lastbox spare line"); process.exit(1); }
+console.log("PASS lastbox gate flow");
 EOF
 
 echo "== v0.3 gate: dir build, budget, verify, base64 =="

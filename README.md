@@ -36,6 +36,9 @@ on click "#count" {
 ```
 ````
 
+Build `example/index.md` and open it: **The Last Box**, a four-minute story
+about leaving, running entirely as one file.
+
 ## Features
 
 - **Hermetic by construction** — `cairn verify` audits built pages for external

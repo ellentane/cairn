@@ -192,18 +192,38 @@ async function main() {
     if (!prog) { failed++; console.error("FAIL --from-file: no cairnBoot literal found"); }
     else {
       const d = new MockDoc();
-      for (const id of ["btn", "out", "chk", "status", "box"]) d.add(new MockNode(id));
-      d.nodes.status.textContent = "pending";
+      for (const id of ["room","win","clock","story","box","total","left","nameline","name","fb","seal","ending","e-time","e-l1","e-stay","e-l2","e-name","e-mug","e-coat","e-notebook","e-cassette","e-photo","e-note","e-note-left","e-final","zero","one","scratch","w-mug","w-coat","w-notebook","w-cassette","w-photo","w-note","mem-mug","mem-coat","mem-notebook","mem-cassette","mem-photo","mem-note","mug-btn","coat-btn","notebook-btn","cassette-btn","photo-btn","note-btn","drawer-btn","row-mug","note-row","fill-mug"]) d.add(new MockNode(id));
+      d.nodes.zero._text = "0"; d.nodes.one._text = "1";
+      d.nodes["w-mug"]._text = "400"; d.nodes["w-coat"]._text = "1800";
+      d.nodes["w-notebook"]._text = "700"; d.nodes["w-cassette"]._text = "1200";
+      d.nodes["w-photo"]._text = "100"; d.nodes["w-note"]._text = "0";
+      d.nodes["mem-mug"]._text = "mem-mug"; d.nodes["mem-coat"]._text = "mem-coat";
+      d.nodes["mem-notebook"]._text = "mem-notebook"; d.nodes["mem-cassette"]._text = "mem-cassette";
+      d.nodes["mem-photo"]._text = "mem-photo"; d.nodes["mem-note"]._text = "mem-note";
+      d.nodes.clock._text = "5:14";
+      d.nodes["note-row"].classList.add("off");
       boot(prog, d);
-      d.nodes.btn.fire("click");
-      eq(d.nodes.out.textContent, "Status: 1", "example: click #btn -> #out text");
-      d.nodes.box.fire("mouseenter");
-      eq(d.nodes.box.classList.has("lit"), true, "example: hover (#box) -> mouseenter -> class");
-      d.nodes.chk.fire("click");
-      eq(d.nodes.status.textContent, "pending", "example: extract/if with non-matching value");
-      d.nodes.status.textContent = "done";
-      d.nodes.chk.fire("click");
-      eq(d.nodes.status.textContent, "already done", "example: extract/if with matching value");
+      eq(d.nodes.clock.textContent, "5:14", "lastbox: clock starts 5:14");
+      d.nodes["mug-btn"].fire("click");
+      eq(d.nodes.total.textContent, "400", "lastbox: mug -> 400 g");
+      eq(d.nodes.clock.textContent, "5:15", "lastbox: put costs a minute");
+      d.nodes["coat-btn"].fire("click");
+      d.nodes["cassette-btn"].fire("click");
+      eq(d.nodes.total.textContent, "2200", "lastbox: coat caps the box at 2200");
+      d.nodes["mug-btn"].fire("click");
+      eq(d.nodes.fb.textContent, "the box won't close. something has to come out.", "lastbox: over-limit rejected");
+      eq(d.nodes.total.textContent, "1800", "lastbox: mug taken back out");
+      d.nodes["drawer-btn"].fire("click");
+      eq(d.nodes["note-row"].classList.has("off"), false, "lastbox: drawer reveals the note");
+      d.nodes.name.value = "ada";
+      d.nodes["seal"].fire("click");
+      eq(d.nodes["e-time"].textContent, "5:19.", "lastbox: seal time");
+      eq(d.nodes["e-l1"].textContent, "you made it with time to spare.", "lastbox: spare line");
+      eq(d.nodes["e-name"].textContent, "ada", "lastbox: name on label");
+      eq(d.nodes["e-note-left"].textContent, "the note stays in the drawer. someone else will find it.", "lastbox: opened-but-left variant");
+      eq(d.nodes["e-final"].textContent, "the room is empty. it was a good room. someone else will say that, too.", "lastbox: ending B");
+      d.nodes["row-mug"].fire("mouseenter");
+      eq(d.nodes["row-mug"].classList.has("lit"), true, "lastbox: row catches the light");
     }
   }
 

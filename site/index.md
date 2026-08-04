@@ -33,8 +33,7 @@ on click "#count" {
 
 ## Live example
 
-The [full showcase page](example.html) exercises every DSL feature end to end —
-hover, counters, comparisons, input echo.
+[The Last Box](example.html) — clear one room before the train leaves at 5:42. Every action costs a minute; the clock on the wall ticks. Built as a single file, like everything else here.
 
 ## Building
 
