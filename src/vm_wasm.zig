@@ -251,7 +251,7 @@ fn run(entry: u32) u32 {
                 const b = pop();
                 const a = pop();
                 const res = sliceEq(memSlice(a.ptr, a.len), memSlice(b.ptr, b.len));
-                pushU8(res);
+                if (!pushU8(res)) { err = ERR_OPCODE; break; }
             },
             14 => { // JMP_IF_FALSE
                 const target = u16At(ip);
@@ -325,7 +325,7 @@ fn run(entry: u32) u32 {
                         else => unreachable,
                     };
                 }
-                pushU8(res);
+                if (!pushU8(res)) { err = ERR_OPCODE; break; }
             },
             25 => { // JMP_IF_TRUE
                 const target = u16At(ip);
@@ -348,10 +348,10 @@ fn run(entry: u32) u32 {
     return err;
 }
 
-fn pushU8(v: bool) void {
-    const p = scratchAlloc(1) orelse return;
+fn pushU8(v: bool) bool {
+    const p = scratchAlloc(1) orelse return false;
     mem[p] = if (v) 1 else 0;
-    _ = push(p, 1);
+    return push(p, 1);
 }
 
 fn popByte() u8 {
