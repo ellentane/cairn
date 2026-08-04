@@ -5,3 +5,4 @@ docs/
 node_modules/
 tmp-e2e/
 test-results/
+dist/
