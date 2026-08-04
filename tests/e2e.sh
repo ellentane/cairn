@@ -30,6 +30,9 @@ cat /tmp/opencode/cairn-report.txt
 echo "== VM behavior on built page =="
 node tests/vm_test.js --from-file index.html
 
+echo "== wasm equivalence =="
+node tests/wasm_equiv.js
+
 echo "== last box (Node smoke) =="
 node tests/showcase_smoke.js index.html
 
