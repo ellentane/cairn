@@ -254,24 +254,6 @@ fn stateStore(name: []const u8, val: []const u8) bool {
     return true;
 }
 
-fn stateStoreAdopt(name: []const u8, ptr: u32, len: u32, cap: u32) bool {
-    const idx = stateFind(name) orelse blk: {
-        var i: u32 = 0;
-        while (i < STATE_ENTRIES) : (i += 1) {
-            if (mem[entryBase(i)] == 0) break :blk i;
-        }
-        return false; // state table full: loud failure
-    };
-    const e = entryBase(idx);
-    const old = entryField(e, NAME_CAP);
-    if (old != 0 and old != ptr) heapFree(old);
-    setEntryField(e, NAME_CAP, ptr);
-    setEntryField(e, NAME_CAP + 4, len);
-    setEntryField(e, NAME_CAP + 8, cap);
-    copyEntryName(e, name);
-    return true;
-}
-
 fn getStr() ?[]const u8 {
     const p = strPayload(&ip) orelse return null;
     return memSlice(p.ptr, p.len);
@@ -330,26 +312,21 @@ fn run(entry: u32) u32 {
             10 => break, // HALT
             11, 27 => { // EXTRACT_TEXT / EXTRACT_VALUE
                 const name = strPayload(&ip) orelse { err = ERR_OPCODE; break; };
-                // extract heap-direct: double the buffer while dom_get_text
-                // returns a full block (possible truncation); the doubling
-                // loop terminates when cap exceeds the 64 KiB heap (loud)
-                var cap: usize = 4096;
-                while (true) {
-                    const blk = heapAlloc(cap) orelse { err = ERR_OPCODE; break; };
-                    const n = dom_get_text(cur_sel, if (op == 11) 0 else 1, base() + blk.ptr, blk.cap);
-                    if (n < blk.cap) {
-                        if (!stateStoreAdopt(memSlice(name.ptr, name.len), blk.ptr, n, blk.cap)) {
-                            heapFree(blk.ptr);
-                            err = ERR_OPCODE;
-                            break;
-                        }
-                        break;
-                    }
-                    // exactly full: possibly truncated — retry with 2x
-                    heapFree(blk.ptr);
-                    cap *= 2;
-                    if (cap > HEAP_CAP) { err = ERR_OPCODE; break; }
-                }
+                // extract via scratch (64 KiB, per-run), then copy into an
+                // exact-size heap block: doubling heap allocs would fragment
+                // the bump pointer (freed intermediates advance heap_top), so
+                // a single scratch read keeps the heap contiguous. A read
+                // filling the scratch cap is ambiguous truncation -> loud.
+                // The scratch buffer is released after the heap copy so
+                // subsequent ops (e.g. PUSH_VAR of the value) still have room.
+                const saved_extract_scratch = scratch_top;
+                const extract_cap = SCRATCH_OFF + SCRATCH_CAP - scratch_top - 8;
+                if (extract_cap < 1) { err = ERR_OPCODE; break; }
+                const dest = scratchAlloc(extract_cap) orelse { err = ERR_OPCODE; break; };
+                const n = dom_get_text(cur_sel, if (op == 11) 0 else 1, base() + dest, extract_cap);
+                if (n >= extract_cap) { err = ERR_OPCODE; break; }
+                if (!stateStore(memSlice(name.ptr, name.len), memSlice(dest, n))) { err = ERR_OPCODE; break; }
+                scratch_top = saved_extract_scratch;
             },
             12 => { // PUSH_VAR (copies the value into scratch so the operand
                 // stack never holds heap pointers — stores can free blocks)

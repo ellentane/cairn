@@ -4,8 +4,8 @@
 // passes to imports are absolute linear-memory addresses.
 function cairnBootWasm(wasmBytes, bytecode, doc) {
   doc = doc || (typeof document !== "undefined" ? document : null);
+  var names = ["ok", "StepLimitExceeded", "EventDepthExceeded", "UnknownOpcode", "NonNumeric"];
   function vmError(code) {
-    var names = ["ok", "StepLimitExceeded", "EventDepthExceeded", "UnknownOpcode", "NonNumeric"];
     var e = new Error("cairn-wasm: " + (names[code] || ("error " + code)));
     e.cairnCode = code;
     return e;
@@ -72,7 +72,7 @@ function cairnBootWasm(wasmBytes, bytecode, doc) {
         nodes[k].addEventListener(ev, function () {
           instance.exports.set_cur_sel(h); // §9.3: handler argument passing
           var e2 = instance.exports.run_at(addr);
-          if (e2 !== 0) console.error("cairn-wasm: " + e2);
+          if (e2 !== 0) console.error("cairn-wasm: " + (names[e2] || ("error " + e2)));
         });
       }
     })(pendingEvents[p].ev, pendingEvents[p].addr, handles[pendingEvents[p].h] || [], pendingEvents[p].h);

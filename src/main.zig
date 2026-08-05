@@ -129,6 +129,62 @@ const RenderOut = struct {
     bytecode: []const u8,
 };
 
+// --vm wasm only: walk the compiled bytecode (same slice that reaches the
+// emitter) and warn when the state-variable envelope exceeds the wasm VM's
+// state table: > 64 distinct names (STATE_ENTRIES) or any name longer than
+// NAME_CAP-1 = 31 bytes. Values are heap-stored (no cap) — names only. The
+// walk mirrors tests/bytecode.js: str payloads at ops 1,2,4,5,6,7,8,11,12,15,
+// 16,27 (8 is str+addr); addr at 9,14,25; no payload elsewhere; strings are
+// u16le length + bytes. Unknown opcodes bail out of the walk silently (a
+// warning path must never fail the build).
+fn wasmEnvelopeWarn(arena: std.mem.Allocator, bytecode: []const u8) void {
+    var rest = bytecode;
+    if (rest.len >= 2 and rest[0] == 0 and rest[1] == 1) rest = rest[2..]; // --strict-format header
+    var names: std.ArrayList([]const u8) = .empty;
+    var i: usize = 0;
+    while (i < rest.len) {
+        const op = rest[i];
+        i += 1;
+        switch (op) {
+            1, 2, 4, 5, 6, 7, 8, 11, 12, 15, 16, 27 => {
+                if (i + 2 > rest.len) return;
+                const n = @as(usize, rest[i]) | (@as(usize, rest[i + 1]) << 8);
+                i += 2;
+                if (i + n > rest.len) return;
+                switch (op) {
+                    11, 12, 15, 16, 27 => {
+                        const name = rest[i .. i + n];
+                        if (name.len > 31) {
+                            std.debug.print("cairn: warning: variable name \"{s}\" is {d} bytes (wasm limit 31) — page will fall back to the JS VM\n", .{ name, name.len });
+                        }
+                        var dup = false;
+                        for (names.items) |prev| if (std.mem.eql(u8, prev, name)) {
+                            dup = true;
+                            break;
+                        };
+                        if (!dup) names.append(arena, name) catch return;
+                    },
+                    else => {},
+                }
+                i += n;
+                if (op == 8) { // ON_EVENT: str + addr
+                    if (i + 2 > rest.len) return;
+                    i += 2;
+                }
+            },
+            9, 14, 25 => { // JUMP / JMP_IF_FALSE / JMP_IF_TRUE: addr
+                if (i + 2 > rest.len) return;
+                i += 2;
+            },
+            3, 10, 13, 17, 18, 19, 20, 21, 22, 23, 24, 26 => {},
+            else => return,
+        }
+    }
+    if (names.items.len > 64) {
+        std.debug.print("cairn: warning: program uses {d} state variables (wasm limit 64) — page will fall back to the JS VM\n", .{names.items.len});
+    }
+}
+
 fn renderPage(arena: std.mem.Allocator, io: std.Io, source: []const u8, diag_path: []const u8, base_dir: ?[]const u8, opts: Options) !RenderOut {
     const result = try markdown.renderAll(arena, io, source, base_dir);
     var bytecode: []const u8 = &.{0x0A};
@@ -150,13 +206,15 @@ fn renderPage(arena: std.mem.Allocator, io: std.Io, source: []const u8, diag_pat
         bytecode = try std.fmt.allocPrint(arena, "\x00\x01{s}", .{bytecode});
     }
     // --vm wasm: the wasm backend's bytecode region is 8 KiB (the glue strips
-    // the format prefix before its length check, so mirror that here)
+    // the format prefix before its length check, so mirror that here); the
+    // state table (64 x name[31]) is the other hard envelope — warn, don't fail
     if (opts.vm == .wasm) {
         var wasm_bytecode_len = bytecode.len;
         if (wasm_bytecode_len >= 2 and bytecode[0] == 0 and bytecode[1] == 1) wasm_bytecode_len -= 2;
         if (wasm_bytecode_len > 0x2000) {
             std.debug.print("cairn: warning: bytecode is {d} bytes — exceeds the wasm VM's 8 KiB region; page will fall back to the JS VM\n", .{wasm_bytecode_len});
         }
+        wasmEnvelopeWarn(arena, bytecode);
     }
     var wasm_b64: ?[]const u8 = null;
     if (opts.vm == .wasm) {
@@ -210,6 +268,9 @@ fn buildSource(arena: std.mem.Allocator, io: std.Io, source: []const u8, base_di
     };
     emitter.printReport(out.page.sizes, opts.output);
     if (opts.audio) |audio_path| {
+        if (std.mem.eql(u8, audio_path, opts.output)) {
+            fatal("--audio output must differ from --output (it would overwrite the page)", .{});
+        }
         const page_bytes = std.Io.Dir.cwd().readFileAlloc(io, opts.output, arena, .limited(1 << 24)) catch |e|
             fatal("cannot read back {s}: {s}", .{ opts.output, @errorName(e) });
         const wav = audio.encode(arena, page_bytes) catch |e| switch (e) {
