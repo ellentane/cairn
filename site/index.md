@@ -26,10 +26,15 @@ on click "#count" {
 - **Hermetic** — one file, no network requests (audited by `cairn verify` in CI)
 - **A state machine DSL** — `let`, `inc`, expressions, `if`/`else`, `while`,
   text and input-value extraction
+- **A WASM VM backend** — the embedded VM runs as Zig-compiled WebAssembly,
+  falling back to the JS VM automatically; `--strict-format` pins the
+  bytecode header
+- **An audio relay** — `--audio` encodes any page into a WAV you can play
+  from a speaker; `decode.html` reconstructs it from a file or microphone
 - **Size budgets and tiers** — fail builds over budget; every page gets a tier
   badge and a half-life score
-- **Verified** — golden bytecode vectors, dual VM test suites, an end-to-end
-  gate, and browser tests
+- **Verified** — golden bytecode vectors, a JS/WASM equivalence harness, an
+  end-to-end gate, and browser tests
 
 ## Live example
 
