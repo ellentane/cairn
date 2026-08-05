@@ -88,10 +88,10 @@
   // largest magnitude. Amplitude-invariant (AGC-proof); phase-invariant
   // (radio chains inject arbitrary carrier phase). Returns bit values:
   // tones[0] (mark) = 1, tones[1] (space) = 0, per the v1 convention.
-  function demodIQ(samples, cfg) {
+  function demodIQAt(samples, cfg, t0) {
     const { sr, spb, tones } = cfg;
     const out = [];
-    let t = 0;
+    let t = t0;
     while (t + spb <= samples.length + 1e-9) {
       const mags = tones.map(() => 0);
       for (let k = 0; k < tones.length; k++) {
@@ -111,6 +111,144 @@
       t += spb;
     }
     return out;
+  }
+
+  function demodIQ(samples, cfg) {
+    return demodIQAt(samples, cfg, 0);
+  }
+
+  // ---- frame-v2 decode (audio relay v2) ----
+  // Link profiles mirror LINK_PROFILES in src/audio.zig and
+  // tests/link_profiles.json; SYNC_WORD/PREAMBLE_BYTES mirror the same tables.
+  // Wire layout: go cue (400 Hz) | preamble 0xAA x96 | sync word (32 bits
+  // MSB-first) | data bits | stop tone (800 Hz). Data region: [profile u8]
+  // [compressed_len u32le][gzip payload][crc32 u32le over the region],
+  // zero-padded to a PAD_GROUP (3568) multiple, RS(255,223) per 223-byte
+  // block, interleaved depth-16 row-major. Bits are MSB first; bit 1 ->
+  // tone_low (mark), bit 0 -> tone_high (space), per the v1 convention.
+  const ENCODER_RATE = 19200;
+  const LINK_PROFILES = [
+    { name: "clean", tone_low: 1200, tone_high: 2400, samples_per_bit: 8 },
+    { name: "radio", tone_low: 1200, tone_high: 2000, samples_per_bit: 12 },
+  ];
+  const SYNC_WORD = 0xD3A94E57;
+  const PREAMBLE_BYTES = 96;
+  const V2_GROUP_LEN = 16 * 255; // wire bytes per interleave group (depth x RS block)
+
+  class WavParseError extends Error {}
+  class SyncNotFound extends Error {}
+  class RSCorrectionFailed extends Error {}
+  class CRCError extends Error {}
+
+  function parseWav(wavBytes) {
+    if (String.fromCharCode(wavBytes[0], wavBytes[1], wavBytes[2], wavBytes[3]) !== "RIFF") {
+      throw new WavParseError("not a RIFF wav");
+    }
+    const view = new DataView(wavBytes.buffer, wavBytes.byteOffset, wavBytes.byteLength);
+    let off = 12, dataOff = -1, dataLen = 0, sr = 0, channels = 1;
+    while (off + 8 <= wavBytes.length) {
+      const id = String.fromCharCode(wavBytes[off], wavBytes[off + 1], wavBytes[off + 2], wavBytes[off + 3]);
+      const len = view.getUint32(off + 4, true);
+      if (id === "fmt " && len >= 16) {
+        channels = view.getUint16(off + 10, true);
+        sr = view.getUint32(off + 12, true);
+      } else if (id === "data") {
+        dataOff = off + 8;
+        dataLen = len;
+        break;
+      }
+      off += 8 + len;
+    }
+    if (dataOff < 0) throw new WavParseError("no data chunk");
+    if (dataOff + dataLen > wavBytes.length) dataLen = wavBytes.length - dataOff;
+    if (sr <= 0) throw new WavParseError("fmt chunk missing sample rate");
+    // mono assumption: keep channel 0 of an interleaved stream; the strided
+    // getInt16 read is parity-safe regardless of data chunk offset
+    const n = Math.floor(Math.floor(dataLen / 2) / channels);
+    const samples = new Int16Array(n);
+    if (dataOff % 2 === 0 && channels === 1) {
+      samples.set(new Int16Array(wavBytes.buffer, wavBytes.byteOffset + dataOff, n));
+    } else {
+      for (let i = 0; i < n; i++) samples[i] = view.getInt16(dataOff + i * channels * 2, true);
+    }
+    return { sr, samples };
+  }
+
+  // Sync search at 2x oversampling: demodulate the stream on two phase grids
+  // (offset 0 and spb/2) and scan each for the sync word. Candidates must pass
+  // the preamble gate (>=4 of the 8 bytes before the sync are 0xAA); among
+  // gated candidates the phase with the most preamble bits matching the 0xAA
+  // pattern wins. Returns the winning demodulated bit stream and sync position
+  // (start of the sync word's 32 bits), or null.
+  function findSyncBits(samples, sr, spb, tones) {
+    let best = null;
+    for (const offset of [0, spb / 2]) {
+      const bits = demodIQAt(samples, { sr, spb, tones }, offset);
+      let win = 0;
+      for (let p = 0; p < bits.length; p++) {
+        win = ((win << 1) | bits[p]) >>> 0;
+        if (p < 31) continue;
+        if (win !== SYNC_WORD) continue;
+        const syncStart = p - 31;
+        if (syncStart < PREAMBLE_BYTES * 8) continue;
+        let aa = 0;
+        for (let b = 0; b < 8; b++) {
+          let byte = 0;
+          for (let k = 0; k < 8; k++) byte = (byte << 1) | bits[syncStart - 64 + b * 8 + k];
+          if (byte === 0xAA) aa++;
+        }
+        if (aa < 4) continue;
+        let score = 0;
+        for (let j = 0; j < PREAMBLE_BYTES * 8; j++) {
+          if (bits[syncStart - PREAMBLE_BYTES * 8 + j] === (j % 2 === 0 ? 1 : 0)) score++;
+        }
+        if (best === null || score > best.score) best = { bits, syncStart, score };
+      }
+    }
+    return best;
+  }
+
+  // Demodulate the data bits at the locked phase (the winning stream already
+  // covers the whole recording), deinterleave group by group, RS-decode each
+  // codeword, rebuild the data region, and verify the crc32 over
+  // [profile][compressed_len][gzip payload] before trimming to compressed_len.
+  function decodeRegionBits(bits, syncStart) {
+    const dataStart = syncStart + 32; // sync word (32 bits) follows the preamble
+    const wireBytes = bitsToBytes(bits.slice(dataStart));
+    let region = new Uint8Array(0);
+    for (let g = 0; g + V2_GROUP_LEN <= wireBytes.length; g += V2_GROUP_LEN) {
+      const group = rs.deinterleave(wireBytes.subarray(g, g + V2_GROUP_LEN), 16, 255);
+      for (const cw of group) {
+        const dec = rs.decode(cw);
+        if (dec === null) throw new RSCorrectionFailed("uncorrectable codeword");
+        const next = new Uint8Array(region.length + dec.length);
+        next.set(region);
+        next.set(dec, region.length);
+        region = next;
+      }
+      if (region.length >= 9) {
+        const len = (region[1] | (region[2] << 8) | (region[3] << 16) | (region[4] << 24)) >>> 0;
+        if (5 + len + 4 <= region.length) {
+          const got = (region[5 + len] | (region[6 + len] << 8) | (region[7 + len] << 16) | (region[8 + len] << 24)) >>> 0;
+          if (crc32(region.subarray(0, 5 + len)) === got) return region.slice(5, 5 + len);
+        }
+      }
+    }
+    throw new CRCError("no region crc match");
+  }
+
+  // Find the frame on its own: try each link profile, scanning the sample
+  // stream for the sync word; return the recovered compressed payload.
+  function decodeFrame(wavBytes) {
+    const { sr, samples } = parseWav(wavBytes);
+    for (const profile of LINK_PROFILES) {
+      const spb = sr / (ENCODER_RATE / profile.samples_per_bit);
+      const found = findSyncBits(samples, sr, spb, [profile.tone_low, profile.tone_high]);
+      if (found === null) continue;
+      const compressed = decodeRegionBits(found.bits, found.syncStart);
+      return { profile: profile.name, compressed };
+    }
+    throw new SyncNotFound("no frame found");
   }
 
   // Reed-Solomon (255,223) codec (v2 audio relay). Parameterization matches
@@ -318,9 +456,12 @@
     return _gunzip(bytes);
   }
 
+  const rs = { encode: rsEncode, decode: rsDecode, deinterleave, gfMul, N: RS_N, K: RS_K, NSYM: RS_NSYM };
+
   const api = {
-    decodeWavBytes, crc32, demodIQ, gunzipSync,
-    rs: { encode: rsEncode, decode: rsDecode, deinterleave, gfMul, N: RS_N, K: RS_K, NSYM: RS_NSYM },
+    decodeWavBytes, crc32, demodIQ, gunzipSync, decodeFrame,
+    errors: { WavParseError, SyncNotFound, RSCorrectionFailed, CRCError },
+    rs,
   };
   if (typeof module !== "undefined" && module.exports) module.exports = api;
   else root.CairnDecoder = api;
