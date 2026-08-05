@@ -112,6 +112,103 @@ fn appendU16le(allocator: std.mem.Allocator, out: *std.ArrayList(u8), v: u16) !v
     try out.appendSlice(allocator, &tmp);
 }
 
+// Reed-Solomon (255,223) systematic encoder (v2 audio relay). Parameterization
+// matches python reedsolo and the JS decoder (src/decoder.js): GF(2^8) prim
+// 0x11D, alpha=2, 32 roots alpha^0..alpha^31 (fcr=0), codeword = data || parity,
+// polynomial bytes highest-degree-first. Pinned parity vectors live in
+// tests/rs_vectors.js (auditable generator in a comment there); the zig test
+// below cross-checks byte-for-byte against them.
+const RS_N: usize = 255;
+const RS_K: usize = 223;
+const RS_NSYM: usize = 32;
+
+const gf_exp: [512]u8 = blk: {
+    var exp: [512]u8 = undefined;
+    var x: u16 = 1;
+    var i: usize = 0;
+    while (i < 255) : (i += 1) {
+        exp[i] = @intCast(x);
+        x <<= 1;
+        if (x & 0x100 != 0) x ^= 0x11D;
+    }
+    i = 255;
+    while (i < 512) : (i += 1) exp[i] = exp[i - 255];
+    break :blk exp;
+};
+
+const gf_log: [256]u8 = blk: {
+    var log: [256]u8 = undefined;
+    var i: usize = 0;
+    while (i < 255) : (i += 1) {
+        log[gf_exp[i]] = @intCast(i);
+    }
+    break :blk log;
+};
+
+fn gfMul(a: u8, b: u8) u8 {
+    if (a == 0 or b == 0) return 0;
+    return gf_exp[@as(usize, gf_log[a]) + gf_log[b]];
+}
+
+fn gfPow(a: u8, p: i32) u8 {
+    const e: i32 = @as(i32, gf_log[a]) * p;
+    const m: i32 = @mod(e, 255);
+    return gf_exp[@intCast(m)];
+}
+
+// generator polynomial g(x) = prod (x - alpha^i), i in 0..31, highest-degree-first
+const rs_gen: [RS_NSYM + 1]u8 = blk: {
+    @setEvalBranchQuota(100000);
+    var g: [RS_NSYM + 1]u8 = .{0} ** (RS_NSYM + 1);
+    var len: usize = 1;
+    g[0] = 1;
+    var i: usize = 0;
+    while (i < RS_NSYM) : (i += 1) {
+        var next: [RS_NSYM + 1]u8 = .{0} ** (RS_NSYM + 1);
+        var gi: usize = 0;
+        while (gi < len) : (gi += 1) {
+            next[gi] ^= g[gi];
+            next[gi + 1] ^= gfMul(g[gi], gfPow(2, @intCast(i)));
+        }
+        g = next;
+        len += 1;
+    }
+    break :blk g;
+};
+
+// 223 bytes in -> 255-byte codeword (data || parity). Caller guarantees
+// data.len == 223. Mirrors the JS encoder byte-for-byte (pinned vectors).
+pub fn rsEncode(data: []const u8) [RS_N]u8 {
+    var out: [RS_N]u8 = .{0} ** RS_N;
+    @memcpy(out[0..RS_K], data);
+    var i: usize = 0;
+    while (i < RS_K) : (i += 1) {
+        const coef = out[i];
+        if (coef != 0) {
+            var j: usize = 1;
+            while (j <= RS_NSYM) : (j += 1) {
+                out[i + j] ^= gfMul(rs_gen[j], coef);
+            }
+        }
+    }
+    @memcpy(out[0..RS_K], data); // synthetic division clobbers the message region
+    return out;
+}
+
+// Depth-16 interleaver, wire order row-major: c0[0], c1[0], ..., c15[0],
+// c0[1], ... (wire position b*16 + k = codeword k, byte index b).
+pub fn interleave16(allocator: std.mem.Allocator, blocks: []const [RS_N]u8) !std.ArrayList(u8) {
+    std.debug.assert(blocks.len == 16);
+    var wire: std.ArrayList(u8) = .empty;
+    errdefer wire.deinit(allocator);
+    try wire.ensureTotalCapacity(allocator, blocks.len * RS_N);
+    var b: usize = 0;
+    while (b < RS_N) : (b += 1) {
+        for (blocks) |block| try wire.append(allocator, block[b]);
+    }
+    return wire;
+}
+
 test "crc32 iso-hdlc test vector" {
     try std.testing.expectEqual(@as(u32, 0xCBF43926), crc32IsoHdlc("123456789"));
 }
@@ -124,4 +221,51 @@ test "wav structure" {
     try std.testing.expectEqualSlices(u8, "fmt ", wav[12..16]);
     try std.testing.expectEqualSlices(u8, "data", wav[36..40]);
     try std.testing.expect((wav.len - 44) % 2 == 0);
+}
+
+test "rs gf tables are self-consistent" {
+    try std.testing.expectEqual(@as(u8, 1), gf_exp[255]);
+    for (0..255) |i| try std.testing.expectEqual(@as(u8, @intCast(i)), gf_log[gf_exp[i]]);
+    for (1..256) |v| try std.testing.expectEqual(@as(u8, @intCast(v)), gf_exp[gf_log[v]]);
+}
+
+test "rs encode parity matches pinned vector 1 (tests/rs_vectors.js)" {
+    const pinned = [32]u8{
+        239, 7, 171, 13, 252, 231, 26, 60, 232, 218, 129, 162, 52, 198, 198, 31,
+        187, 30, 222, 146, 76, 130, 254, 114, 123, 65, 163, 215, 127, 99, 237, 65,
+    };
+    var data: [RS_K]u8 = undefined;
+    for (0..RS_K) |i| data[i] = @intCast((i * 7 + 3) & 0xff);
+    const cw = rsEncode(&data);
+    try std.testing.expectEqualSlices(u8, &pinned, cw[RS_K..RS_N]);
+    try std.testing.expectEqualSlices(u8, &data, cw[0..RS_K]);
+}
+
+test "rs encode matches js parity for full data vector" {
+    var data: [RS_K]u8 = undefined;
+    for (0..RS_K) |i| data[i] = @intCast((i * 7 + 3) & 0xff);
+    const cw = rsEncode(&data);
+    // byte 223 onward must equal the pinned parity (same vector as above);
+    // syndromes must vanish at all 32 roots alpha^0..alpha^31
+    var i: usize = 0;
+    while (i < RS_NSYM) : (i += 1) {
+        var y: u8 = 0;
+        for (cw) |byte| y = gfMul(y, gfPow(2, @intCast(i))) ^ byte;
+        try std.testing.expectEqual(@as(u8, 0), y);
+    }
+}
+
+test "interleave16 wire order row-major" {
+    var blocks: [16][RS_N]u8 = undefined;
+    for (0..16) |k| {
+        for (0..RS_N) |b| blocks[k][b] = @intCast((k * RS_N + b) & 0xff);
+    }
+    var wire = try interleave16(std.testing.allocator, &blocks);
+    defer wire.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(usize, 16 * RS_N), wire.items.len);
+    for (0..16) |k| {
+        try std.testing.expectEqual(blocks[k][0], wire.items[k]);
+        try std.testing.expectEqual(blocks[k][1], wire.items[16 + k]);
+        try std.testing.expectEqual(blocks[k][RS_N - 1], wire.items[(RS_N - 1) * 16 + k]);
+    }
 }

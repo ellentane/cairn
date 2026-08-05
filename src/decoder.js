@@ -113,7 +113,194 @@
     return out;
   }
 
-  const api = { decodeWavBytes, crc32, demodIQ };
+  // Reed-Solomon (255,223) codec (v2 audio relay). Parameterization matches
+  // python reedsolo: GF(2^8) prim 0x11D, alpha=2, 32 roots alpha^0..alpha^31
+  // (fcr=0), systematic encoding (data || parity), polynomial bytes
+  // highest-degree-first (byte 0 = coefficient of x^254). Corrects up to 16
+  // byte-errors per 255-byte codeword; >16 errors -> null (uncorrectable).
+  const RS_N = 255;
+  const RS_K = 223;
+  const RS_NSYM = 32;
+
+  const gfExp = new Uint8Array(512);
+  const gfLog = new Uint8Array(256);
+  {
+    let x = 1;
+    for (let i = 0; i < 255; i++) {
+      gfExp[i] = x;
+      gfLog[x] = i;
+      x <<= 1;
+      if (x & 0x100) x ^= 0x11d;
+    }
+    for (let i = 255; i < 512; i++) gfExp[i] = gfExp[i - 255];
+  }
+
+  function gfMul(a, b) {
+    if (a === 0 || b === 0) return 0;
+    return gfExp[gfLog[a] + gfLog[b]];
+  }
+
+  function gfInv(a) {
+    return gfExp[255 - gfLog[a]];
+  }
+
+  function gfPow(a, p) {
+    return gfExp[((gfLog[a] * p) % 255 + 255) % 255];
+  }
+
+  // polynomial helpers (highest-degree-first)
+  function polyMul(p, q) {
+    const r = new Array(p.length + q.length - 1).fill(0);
+    for (let i = 0; i < p.length; i++)
+      for (let j = 0; j < q.length; j++)
+        r[i + j] ^= gfMul(p[i], q[j]);
+    return r;
+  }
+
+  function polyScale(p, s) {
+    const r = new Array(p.length);
+    for (let i = 0; i < p.length; i++) r[i] = gfMul(p[i], s);
+    return r;
+  }
+
+  function polyAdd(p, q) {
+    const n = Math.max(p.length, q.length);
+    const r = new Array(n).fill(0);
+    for (let i = 0; i < p.length; i++) r[i + n - p.length] ^= p[i];
+    for (let i = 0; i < q.length; i++) r[i + n - q.length] ^= q[i];
+    return r;
+  }
+
+  function polyEval(p, v) {
+    let y = p[0];
+    for (let i = 1; i < p.length; i++) y = gfMul(y, v) ^ p[i];
+    return y;
+  }
+
+  // generator polynomial g(x) = prod (x - alpha^i), i in 0..31
+  let rsGen = [1];
+  for (let i = 0; i < RS_NSYM; i++) rsGen = polyMul(rsGen, [1, gfPow(2, i)]);
+
+  // systematic encoder: data(223) -> codeword(255) = data || parity.
+  // Synthetic division, then restore the message region (division clobbers it).
+  function rsEncode(data) {
+    const out = new Uint8Array(RS_N);
+    out.set(data, 0);
+    for (let i = 0; i < RS_K; i++) {
+      const coef = out[i];
+      if (coef !== 0) {
+        for (let j = 1; j <= RS_NSYM; j++) out[i + j] ^= gfMul(rsGen[j], coef);
+      }
+    }
+    out.set(data, 0);
+    return out;
+  }
+
+  function rsSyndromes(cw) {
+    const synd = [0];
+    for (let i = 0; i < RS_NSYM; i++) synd.push(polyEval(cw, gfPow(2, i)));
+    return synd;
+  }
+
+  function rsFindErrorLocator(synd) {
+    let errLoc = [1];
+    let oldLoc = [1];
+    const syndShift = synd.length - RS_NSYM;
+    for (let i = 0; i < RS_NSYM; i++) {
+      const K = i + syndShift;
+      let delta = synd[K];
+      for (let j = 1; j < errLoc.length; j++) {
+        delta ^= gfMul(errLoc[errLoc.length - 1 - j], synd[K - j]);
+      }
+      oldLoc = oldLoc.concat([0]);
+      if (delta !== 0) {
+        if (oldLoc.length > errLoc.length) {
+          const newLoc = polyScale(oldLoc, delta);
+          oldLoc = polyScale(errLoc, gfInv(delta));
+          errLoc = newLoc;
+        }
+        errLoc = polyAdd(errLoc, polyScale(oldLoc, delta));
+      }
+    }
+    while (errLoc.length > 0 && errLoc[0] === 0) errLoc.shift();
+    const errs = errLoc.length - 1;
+    if (errs * 2 > RS_NSYM) return null;
+    return errLoc;
+  }
+
+  function rsFindErrors(errLoc) {
+    const errPos = [];
+    for (let i = 0; i < RS_N; i++) {
+      if (polyEval(errLoc, gfPow(2, i)) === 0) errPos.push(RS_N - 1 - i);
+    }
+    if (errPos.length !== errLoc.length - 1) return null;
+    return errPos;
+  }
+
+  // Omega(x) = [Synd(x) * err_loc(x)] mod x^(nsym+1)
+  function rsFindErrorEvaluator(synd, errLoc, nsym) {
+    const prod = polyMul(synd, errLoc);
+    const keep = prod.slice(prod.length - (nsym + 1));
+    return keep;
+  }
+
+  function rsCorrectErrata(msg, synd, errPos) {
+    const coefPos = errPos.map(p => msg.length - 1 - p);
+    let errLoc = [1];
+    for (const cp of coefPos) errLoc = polyMul(errLoc, [gfPow(2, cp), 1]); // alpha^cp * x + 1
+    const errEval = rsFindErrorEvaluator(synd.slice().reverse(), errLoc, errLoc.length - 1).reverse();
+    const X = [];
+    for (const cp of coefPos) {
+      const l = RS_N - cp;
+      X.push(gfPow(2, -l));
+    }
+    for (let i = 0; i < X.length; i++) {
+      const Xi = X[i];
+      const XiInv = gfInv(Xi);
+      let errLocPrime = 1;
+      for (let j = 0; j < X.length; j++) {
+        if (j !== i) errLocPrime = gfMul(errLocPrime, 1 ^ gfMul(XiInv, X[j]));
+      }
+      if (errLocPrime === 0) return null;
+      let y = polyEval(errEval.slice().reverse(), XiInv);
+      y = gfMul(gfPow(Xi, 1), y);
+      msg[errPos[i]] ^= gfMul(y, gfInv(errLocPrime));
+    }
+    return msg;
+  }
+
+  // codeword(255) -> data(223) | null. null = uncorrectable (>16 errors); the
+  // input is never silently corrupted.
+  function rsDecode(cw) {
+    const synd = rsSyndromes(cw);
+    if (synd.every(s => s === 0)) return cw.slice(0, RS_K);
+    const errLoc = rsFindErrorLocator(synd);
+    if (errLoc === null) return null;
+    const errPos = rsFindErrors(errLoc.slice().reverse());
+    if (errPos === null) return null;
+    const msg = rsCorrectErrata(cw.slice(), synd, errPos);
+    if (msg === null) return null;
+    const post = rsSyndromes(msg);
+    if (!post.every(s => s === 0)) return null;
+    return msg.slice(0, RS_K);
+  }
+
+  // Row-major inverse of the wire map: wire position b*depth + k -> codeword
+  // k, byte index b. blocks = bytes.length / blockLen (partial groups of fewer
+  // than `depth` codewords are laid out in the first slots of each row).
+  function deinterleave(bytes, depth, blockLen) {
+    if (bytes.length % blockLen !== 0) throw new Error("wire length not a multiple of blockLen");
+    const count = bytes.length / blockLen;
+    const out = [];
+    for (let k = 0; k < count; k++) {
+      const cw = new Uint8Array(blockLen);
+      for (let b = 0; b < blockLen; b++) cw[b] = bytes[b * depth + k];
+      out.push(cw);
+    }
+    return out;
+  }
+
+  const api = { decodeWavBytes, crc32, demodIQ, rsEncode, rsDecode, deinterleave, gfMul, gfExp, gfLog };
   if (typeof module !== "undefined" && module.exports) module.exports = api;
   else root.CairnDecoder = api;
 })(typeof self !== "undefined" ? self : this);
