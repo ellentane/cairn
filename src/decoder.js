@@ -90,6 +90,7 @@
   // tones[0] (mark) = 1, tones[1] (space) = 0, per the v1 convention.
   function demodIQAt(samples, cfg, t0) {
     const { sr, spb, tones } = cfg;
+    const normalize = cfg.normalize || null;
     const out = [];
     let t = t0;
     while (t + spb <= samples.length + 1e-9) {
@@ -103,7 +104,8 @@
           I += samples[tt] * Math.cos(2 * Math.PI * f * tt / sr);
           Q += samples[tt] * Math.sin(2 * Math.PI * f * tt / sr);
         }
-        mags[k] = Math.hypot(I, Q);
+        const nk = normalize ? normalize[k] : 1;
+        mags[k] = Math.hypot(I, Q) / (nk > 0 ? nk : 1);
       }
       let best = 0;
       for (let k = 1; k < tones.length; k++) if (mags[k] > mags[best]) best = k;
@@ -135,10 +137,10 @@
   const PREAMBLE_BYTES = 96;
   const V2_GROUP_LEN = 16 * 255; // wire bytes per interleave group (depth x RS block)
 
-  class WavParseError extends Error {}
-  class SyncNotFound extends Error {}
-  class RSCorrectionFailed extends Error {}
-  class CRCError extends Error {}
+  class WavParseError extends Error { constructor(m) { super(m); this.name = "WavParseError"; } }
+  class SyncNotFound extends Error { constructor(m) { super(m); this.name = "SyncNotFound"; } }
+  class RSCorrectionFailed extends Error { constructor(m) { super(m); this.name = "RSCorrectionFailed"; } }
+  class CRCError extends Error { constructor(m) { super(m); this.name = "CRCError"; } }
 
   function parseWav(wavBytes) {
     if (String.fromCharCode(wavBytes[0], wavBytes[1], wavBytes[2], wavBytes[3]) !== "RIFF") {
@@ -176,12 +178,11 @@
 
   // Sync search at 2x oversampling: demodulate the stream on two phase grids
   // (offset 0 and spb/2) and scan each for the sync word. Candidates must pass
-  // the preamble gate (>=4 of the 8 bytes before the sync are 0xAA); among
-  // gated candidates the phase with the most preamble bits matching the 0xAA
-  // pattern wins. Returns the winning demodulated bit stream and sync position
-  // (start of the sync word's 32 bits), or null.
-  function findSyncBits(samples, sr, spb, tones) {
-    let best = null;
+  // the preamble gate (>=4 of the 8 bytes before the sync are 0xAA). Returns
+  // the ordered candidate list (best preamble-correlation score first) — the
+  // decoder tries them in order and rescans on decode failure.
+  function findSyncCandidates(samples, sr, spb, tones) {
+    const candidates = [];
     for (const offset of [0, spb / 2]) {
       const bits = demodIQAt(samples, { sr, spb, tones }, offset);
       let win = 0;
@@ -202,25 +203,131 @@
         for (let j = 0; j < PREAMBLE_BYTES * 8; j++) {
           if (bits[syncStart - PREAMBLE_BYTES * 8 + j] === (j % 2 === 0 ? 1 : 0)) score++;
         }
-        if (best === null || score > best.score) best = { bits, syncStart, score };
+        candidates.push({ offset, syncStart, score });
       }
     }
+    candidates.sort((a, b) => b.score - a.score);
+    return candidates.slice(0, 8);
+  }
+
+  // Learn per-tone amplitude scalars from the preamble (0xAA = 10101010
+  // alternates mark/space, so both tones are present) and the sync SNR: the
+  // mean ratio of winning-tone to losing-tone correlation across the preamble,
+  // in dB. Returns null if a scalar is unusable.
+  function learnToneScales(samples, sr, spb, tones, offset, syncStart) {
+    const markBits = [], spaceBits = [];
+    for (let j = 0; j < PREAMBLE_BYTES * 8; j++) {
+      const t = offset + j * spb;
+      if (t + spb > samples.length) break;
+      let mI = 0, mQ = 0, sI = 0, sQ = 0;
+      for (let s = 0; s < spb; s++) {
+        const tt = Math.floor(t + s);
+        mI += samples[tt] * Math.cos(2 * Math.PI * tones[0] * tt / sr);
+        mQ += samples[tt] * Math.sin(2 * Math.PI * tones[0] * tt / sr);
+        sI += samples[tt] * Math.cos(2 * Math.PI * tones[1] * tt / sr);
+        sQ += samples[tt] * Math.sin(2 * Math.PI * tones[1] * tt / sr);
+      }
+      const mm = Math.hypot(mI, mQ), sm = Math.hypot(sI, sQ);
+      (j % 2 === 0 ? markBits : spaceBits).push([mm, sm]);
+    }
+    if (markBits.length === 0 || spaceBits.length === 0) return null;
+    const mean = (arr, k) => arr.reduce((a, b) => a + b[k], 0) / arr.length;
+    const markM = mean(markBits, 0), spaceM = mean(spaceBits, 1);
+    if (markM <= 0 || spaceM <= 0) return null;
+    const rMark = mean(markBits, 0) / Math.max(mean(markBits, 1), 1);
+    const rSpace = mean(spaceBits, 1) / Math.max(mean(spaceBits, 0), 1);
+    const syncSnr = 10 * Math.log10((rMark + rSpace) / 2);
+    return { mark: markM, space: spaceM, syncSnr };
+  }
+
+  // Interpolated single-tone complex correlation at an arbitrary (fractional)
+  // window start. Returns {I, Q, mag} (mag normalized by the per-tone scalar).
+  // Linear sample interpolation keeps the complex correlation smooth at any
+  // phase — its PHASE advances at the tone frequency as the window slides,
+  // which is what the timing tracker measures.
+  function winCorrC(samples, sr, f, t, spb, normalize, k) {
+    let I = 0, Q = 0;
+    for (let s = 0; s < spb; s++) {
+      const p = t + s;
+      const i0 = Math.floor(p), fr = p - i0;
+      const x0 = i0 >= 0 && i0 < samples.length ? samples[i0] : 0;
+      const x1 = i0 + 1 < samples.length ? samples[i0 + 1] : 0;
+      const xv = x0 + (x1 - x0) * fr;
+      I += xv * Math.cos(2 * Math.PI * f * p / sr);
+      Q += xv * Math.sin(2 * Math.PI * f * p / sr);
+    }
+    const nk = normalize[k];
+    return { I, Q, mag: Math.hypot(I, Q) / (nk > 0 ? nk : 1) };
+  }
+
+  const ANCHOR_BITS = 512;      // re-anchor the sampling phase every N bits
+  const PROBE_OFFSETS = [-2, -1, 0, 1, 2]; // candidate phase corrections (samples)
+  const PROBE_BITS = 64;        // probe window length in bits
+
+  // Measure the best integer-sample phase correction at time t: correlate a
+  // PROBE_BITS-bit window at each candidate offset and pick the one with the
+  // largest summed winning-tone magnitude. Runs every ANCHOR_BITS bits so the
+  // sampling phase tracks ~100 ppm recorder clock drift.
+  function probePhase(samples, sr, spb, tones, normalize, t) {
+    let best = 0, bestSum = -1, zeroSum = -1;
+    for (const off of PROBE_OFFSETS) {
+      let sum = 0;
+      for (let b = 0; b < PROBE_BITS; b++) {
+        const tt = t + off + b * spb;
+        const c0 = winCorrC(samples, sr, tones[0], tt, spb, normalize, 0);
+        const c1 = winCorrC(samples, sr, tones[1], tt, spb, normalize, 1);
+        sum += c0.mag >= c1.mag ? c0.mag : c1.mag;
+      }
+      if (off === 0) zeroSum = sum;
+      if (sum > bestSum) { bestSum = sum; best = off; }
+    }
+    // only correct when the best offset beats the current phase by a real
+    // margin: with tones that are sub-harmonics of the bit rate (the clean
+    // profile's 0.5/1.0 cycles per bit) the correlation is flat across window
+    // shifts (measured < 0.1%), and blind corrections would walk the phase
+    // away. The radio profile's misalignment signal is ~1%, so 0.3% separates
+    // the two.
+    if (best !== 0 && bestSum < zeroSum * 1.003) return 0;
     return best;
   }
 
-  // Demodulate the data bits at the locked phase (the winning stream already
-  // covers the whole recording), deinterleave group by group, RS-decode each
-  // codeword, rebuild the data region, and verify the crc32 over
-  // [profile][compressed_len][gzip payload] before trimming to compressed_len.
-  function decodeRegionBits(bits, syncStart) {
-    const dataStart = syncStart + 32; // sync word (32 bits) follows the preamble
-    const wireBytes = bitsToBytes(bits.slice(dataStart));
+  // Demodulate `bitCount` data bits starting at phaseState.phase, with
+  // per-tone normalization and periodic phase re-anchoring (probePhase every
+  // ANCHOR_BITS bits). Keeps ~100 ppm recorder clock drift from accumulating
+  // over a long frame; decisions are robust to a residual phase error of a few
+  // samples (the bit window is spb samples wide).
+  function demodTracked(samples, sr, spb, tones, phaseState, bitCount, normalize) {
+    const bits = [];
+    let t = phaseState.phase;
+    for (let d = 0; d < bitCount; d++) {
+      if (d > 0 && d % ANCHOR_BITS === 0) t += probePhase(samples, sr, spb, tones, normalize, t);
+      const c0 = winCorrC(samples, sr, tones[0], t, spb, normalize, 0);
+      const c1 = winCorrC(samples, sr, tones[1], t, spb, normalize, 1);
+      bits.push(c0.mag >= c1.mag ? 1 : 0);
+      t += spb;
+    }
+    phaseState.phase = t;
+    return bits;
+  }
+
+  // Demodulate the data region group by group (the phase accumulator persists
+  // across groups so drift keeps tracking), deinterleave, RS-decode each
+  // codeword (collecting correction counts), rebuild the data region, and
+  // verify the crc32 over [profile][compressed_len][gzip payload] before
+  // trimming to compressed_len. Throws RSCorrectionFailed / CRCError.
+  function decodeRegionTracked(samples, sr, spb, tones, t0, normalize, stats) {
+    const phaseState = { phase: t0 };
     let region = new Uint8Array(0);
-    for (let g = 0; g + V2_GROUP_LEN <= wireBytes.length; g += V2_GROUP_LEN) {
-      const group = rs.deinterleave(wireBytes.subarray(g, g + V2_GROUP_LEN), 16, 255);
+    for (;;) {
+      if (phaseState.phase + spb > samples.length) throw new CRCError("no region crc match");
+      const bits = demodTracked(samples, sr, spb, tones, phaseState, V2_GROUP_LEN * 8, normalize);
+      const wireBytes = bitsToBytes(bits);
+      const group = rs.deinterleave(wireBytes, 16, 255);
       for (const cw of group) {
-        const dec = rs.decode(cw);
+        const errs = [];
+        const dec = rs.decode(cw, errs);
         if (dec === null) throw new RSCorrectionFailed("uncorrectable codeword");
+        stats.rsCorrections.push(errs.length ? errs[0] : 0);
         const next = new Uint8Array(region.length + dec.length);
         next.set(region);
         next.set(dec, region.length);
@@ -234,20 +341,32 @@
         }
       }
     }
-    throw new CRCError("no region crc match");
   }
 
   // Find the frame on its own: try each link profile, scanning the sample
-  // stream for the sync word; return the recovered compressed payload.
+  // stream for the sync word; for each sync candidate (in score order, max 8)
+  // learn the tone scalars, demodulate with drift tracking, and decode the
+  // region. Returns the recovered compressed payload and decode stats.
   function decodeFrame(wavBytes) {
     const { sr, samples } = parseWav(wavBytes);
+    let lastErr = null;
     for (const profile of LINK_PROFILES) {
       const spb = sr / (ENCODER_RATE / profile.samples_per_bit);
-      const found = findSyncBits(samples, sr, spb, [profile.tone_low, profile.tone_high]);
-      if (found === null) continue;
-      const compressed = decodeRegionBits(found.bits, found.syncStart);
-      return { profile: profile.name, compressed };
+      const tones = [profile.tone_low, profile.tone_high];
+      for (const cand of findSyncCandidates(samples, sr, spb, tones)) {
+        const scales = learnToneScales(samples, sr, spb, tones, cand.offset, cand.syncStart);
+        if (scales === null) continue;
+        const stats = { syncSnr: scales.syncSnr, rsCorrections: [] };
+        const t0 = cand.offset + (cand.syncStart + 32) * spb;
+        try {
+          const compressed = decodeRegionTracked(samples, sr, spb, tones, t0, scales, stats);
+          return { profile: profile.name, compressed, stats };
+        } catch (e) {
+          lastErr = e;
+        }
+      }
     }
+    if (lastErr) throw lastErr;
     throw new SyncNotFound("no frame found");
   }
 
@@ -408,10 +527,14 @@
   }
 
   // codeword(255) -> data(223) | null. null = uncorrectable (>16 errors); the
-  // input is never silently corrupted.
-  function rsDecode(cw) {
+  // input is never silently corrupted. If `errOut` (an array) is given, the
+  // number of corrected symbols is pushed onto it (0 for a clean codeword).
+  function rsDecode(cw, errOut) {
     const synd = rsSyndromes(cw);
-    if (synd.every(s => s === 0)) return cw.slice(0, RS_K);
+    if (synd.every(s => s === 0)) {
+      if (errOut) errOut.push(0);
+      return cw.slice(0, RS_K);
+    }
     const errLoc = rsFindErrorLocator(synd);
     if (errLoc === null) return null;
     const errPos = rsFindErrors(errLoc.slice().reverse());
@@ -420,6 +543,7 @@
     if (msg === null) return null;
     const post = rsSyndromes(msg);
     if (!post.every(s => s === 0)) return null;
+    if (errOut) errOut.push(errPos.length);
     return msg.slice(0, RS_K);
   }
 

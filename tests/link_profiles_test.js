@@ -75,6 +75,38 @@ function xorshift32(seed, len) {
   return b;
 }
 
+// rebuild a wav around resampled (or sliced) samples, keeping the v2 header
+function rebuildWav(samples) {
+  const hdr = Buffer.alloc(44);
+  hdr.write("RIFF", 0); hdr.writeUInt32LE(36 + samples.length * 2, 4); hdr.write("WAVE", 8);
+  hdr.write("fmt ", 12); hdr.writeUInt32LE(16, 16); hdr.writeUInt16LE(1, 20); hdr.writeUInt16LE(1, 22);
+  hdr.writeUInt32LE(19200, 24); hdr.writeUInt32LE(38400, 28); hdr.writeUInt16LE(2, 32); hdr.writeUInt16LE(16, 34);
+  hdr.write("data", 36); hdr.writeUInt32LE(samples.length * 2, 40);
+  const out = Buffer.alloc(44 + samples.length * 2);
+  hdr.copy(out, 0);
+  for (let i = 0; i < samples.length; i++) out.writeInt16LE(samples[i], 44 + i * 2);
+  return out;
+}
+
+function samplesOf(wav) {
+  const out = new Int16Array((wav.length - 44) / 2);
+  for (let i = 0; i < out.length; i++) out[i] = wav.readInt16LE(44 + i * 2);
+  return out;
+}
+
+// linear resample by `factor` (>1 = longer): simulates a recorder clock offset
+function resample(samples, factor) {
+  const out = new Int16Array(Math.floor(samples.length * factor));
+  for (let i = 0; i < out.length; i++) {
+    const p = i / factor;
+    const i0 = Math.floor(p), f = p - i0;
+    const v0 = samples[Math.min(i0, samples.length - 1)];
+    const v1 = samples[Math.min(i0 + 1, samples.length - 1)];
+    out[i] = Math.round(v0 + (v1 - v0) * f);
+  }
+  return out;
+}
+
 const payloads = [
   { name: "small", data: Buffer.from("hello cairn v2") },
   { name: "40 KB pseudo-random", data: xorshift32(0x9E3779B9, 40 * 1024) },
@@ -94,7 +126,114 @@ for (const run of runs) {
   check(`payload round-trip (${run.profileName}, ${run.payload.name})`, bytesEqual(back, run.payload.data));
 }
 
-// 3. wavprobe CLI errors
+// 3. robustness battery: normalization, drift tracking, rescan, stats
+{
+  const run = runs[2]; // 40 KB pseudo-random, radio profile
+  const wav = encodeV2(run.payload.data, run.profileName);
+
+  // 3a. stats are populated and sane
+  const ok = decodeFrame(wav);
+  check("stats: syncSnr positive", ok.stats && ok.stats.syncSnr > 0);
+  check("stats: rsCorrections non-empty and >= 0", Array.isArray(ok.stats.rsCorrections) &&
+    ok.stats.rsCorrections.length > 0 && ok.stats.rsCorrections.every((n) => n >= 0));
+
+  // 3b. RS overload: 17 errors in ONE codeword (> t=16) must fail loudly.
+  // The test first demodulates the actual region bytes so it can flip them to
+  // their complements — guaranteed errors regardless of payload content.
+  // Interleaving maps 17 consecutive region bytes of one codeword to 17 wire
+  // bytes at stride 16, so every one lands in the same codeword.
+  const overloadWav = Buffer.from(wav);
+  const SR = 19200, spb = 12; // radio profile encoder constants
+  const dataStart = SR * 1.5 + 96 * 8 * spb + 32 * spb; // go cue + preamble + sync
+  function demodRegionBytes(buf, nBytes) {
+    const bytes = [];
+    for (let r = 0; r < nBytes; r++) {
+      let byte = 0;
+      for (let bit = 0; bit < 8; bit++) {
+        const t0 = dataStart + (r * 8 + bit) * spb;
+        let mI = 0, mQ = 0, sI = 0, sQ = 0;
+        for (let s = 0; s < spb; s++) {
+          const tt = t0 + s, v = buf.readInt16LE(44 + tt * 2);
+          mI += v * Math.cos(2 * Math.PI * 1200 * tt / SR); mQ += v * Math.sin(2 * Math.PI * 1200 * tt / SR);
+          sI += v * Math.cos(2 * Math.PI * 2000 * tt / SR); sQ += v * Math.sin(2 * Math.PI * 2000 * tt / SR);
+        }
+        byte = (byte << 1) | (Math.hypot(mI, mQ) >= Math.hypot(sI, sQ) ? 1 : 0);
+      }
+      bytes.push(byte);
+    }
+    return bytes;
+  }
+  const orig = demodRegionBytes(overloadWav, 232);
+  for (let i = 0; i < 17; i++) {
+    const r = 200 + i;
+    const want = orig[r] ^ 0xFF; // complement: guaranteed different
+    // region byte r -> block j = r/223, byte b = r mod 223, codeword k = j mod 16,
+    // group g = j/16; wire position (in group) = b*16 + k -> signal sample
+    // dataStart + (g*48960 + b*16 + k) * 8 * spb
+    const j = Math.floor(r / 223), b = r % 223, k = j % 16, g = Math.floor(j / 16);
+    const base = dataStart + (g * 48960 + b * 16 + k) * 8 * spb;
+    for (let bit = 0; bit < 8; bit++) {
+      const bitVal = (want >> (7 - bit)) & 1;
+      const toneHz = bitVal === 1 ? 1200 : 2000;
+      const sample = base + bit * spb;
+      for (let s = 0; s < spb; s++) {
+        overloadWav.writeInt16LE(Math.round(12000 * Math.sin(2 * Math.PI * toneHz * s / SR)), 44 + (sample + s) * 2);
+      }
+    }
+  }
+  let threw = null;
+  try { decodeFrame(overloadWav); } catch (e) { threw = e; }
+  check("RS overload (17 errors in one codeword) -> RSCorrectionFailed", threw && threw.name === "RSCorrectionFailed");
+
+  // 3c. truncated frame: cut the data chunk to 85% -> clean error, never
+  // wrong output (the final partial group fails RS or the CRC never matches)
+  const truncWav = Buffer.from(wav);
+  const cut = Math.floor(((truncWav.length - 44) / 2) * 0.85);
+  truncWav.writeUInt32LE(cut * 2, 40); // shrink the data chunk length
+  truncWav.writeUInt32LE(36 + cut * 2, 4);
+  const truncBuf = Buffer.from(truncWav.subarray(0, 44 + cut * 2));
+  threw = null;
+  try { decodeFrame(truncBuf); } catch (e) { threw = e; }
+  check("truncated frame -> clean error", threw !== null && (threw.name === "RSCorrectionFailed" || threw.name === "CRCError" || threw.name === "SyncNotFound"));
+
+  // 3d. RS burst injection at wav level: 100 consecutive PCM samples flipped
+  // mid-payload (60% through the frame = safely inside the data region) -> the
+  // interleave+RS must reconstruct the exact original payload
+  const burstWav = Buffer.from(wav);
+  const mid = Math.floor(((burstWav.length - 44) / 2) * 0.6);
+  for (let i = 0; i < 100; i++) {
+    const off = 44 + (mid + i) * 2;
+    burstWav.writeInt16LE(burstWav.readInt16LE(off) ^ 0x5A5A, off);
+  }
+  const burstGot = decodeFrame(burstWav);
+  check("RS burst injection -> exact payload", bytesEqual(gunzipSync(burstGot.compressed), run.payload.data));
+
+  // 3e. drift: 100 ppm recorder clock (linear resample by 1.0001) -> the
+  // early-late tracker must hold phase over the ~2-minute frame
+  const driftWav = rebuildWav(resample(samplesOf(wav), 1.0001));
+  const driftGot = decodeFrame(driftWav);
+  check("100 ppm drift -> exact payload", bytesEqual(gunzipSync(driftGot.compressed), run.payload.data));
+
+  // 3f. preamble clipped: drop the first 100 samples of the frame (into the
+  // go cue) — sync search must still find the frame
+  const s = samplesOf(wav);
+  const clipWav = rebuildWav(s.slice(100));
+  const clipGot = decodeFrame(clipWav);
+  check("preamble partially clipped -> decodes", bytesEqual(gunzipSync(clipGot.compressed), run.payload.data));
+
+  // 3g. corrupted preamble: flip 20 random bytes in the preamble region
+  const pWav = Buffer.from(wav);
+  let x = 0x1234ABCD;
+  for (let i = 0; i < 20; i++) {
+    x = (Math.imul(x, 1664525) + 1013904223) >>> 0;
+    const byteOff = 44 + (SR * 1.5) * 2 + ((x % (96 * 8 * spb)) >> 3) * 2;
+    pWav[byteOff] ^= 0xFF;
+  }
+  const pGot = decodeFrame(pWav);
+  check("corrupted preamble bytes -> decodes", bytesEqual(gunzipSync(pGot.compressed), run.payload.data));
+}
+
+// 4. wavprobe CLI errors
 try {
   execFileSync(wavprobe, ["nope"], { input: Buffer.alloc(0), stdio: "pipe" });
   check("wavprobe rejects unknown profile", false);
