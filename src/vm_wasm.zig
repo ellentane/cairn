@@ -6,9 +6,18 @@
 //   0x0014        context stack: 32 x {ip:u32, sp:u32} = 256 bytes (0x14..0x114)
 //   0x1000        bytecode region (8 KiB)
 //   0x3000        operand stack: 256 x {ptr:u32, len:u32} = 2 KiB (0x3000..0x37FF)
-//   0x3800        state table: 64 x {name[32], val[256]} = 18 KiB (0x3800..0x7FFF)
-//   0x8000        scratch region (2 KiB, bump-allocated per run)
-//   0x8800        end of memory
+//   0x3800        state table: 64 x {name[32], ptr:u32, len:u32, cap:u32} =
+//                 = 64 x 44 = 2816 B (0x3800..0x4300); name[0] == 0 marks a free
+//                 entry; ptr/len/cap point into the state value heap below
+//   0x4300        state value heap: 64 KiB, bump + free-list (0x4300..0x14300).
+//                 Blocks are {size:u32, payload[...]}; payload starts at block+8.
+//                 Free blocks reuse the first 8 bytes as {size:u32, next_free:u32}.
+//                 heap_top and free_head are globals that PERSIST across runs
+//                 (state lives in the heap); only scratch resets per run.
+//   0x14300       scratch region: 64 KiB (per-run, bump-allocated; 0x14300..0x24300).
+//                 Sized to the heap so a PUSH_VAR copy of any stored value
+//                 fits; only scratch resets per run
+//   0x24300       end of memory
 
 const std = @import("std");
 
@@ -20,7 +29,7 @@ extern fn dom_get_text(handle: u32, op: u32, dest_ptr: u32, dest_cap: u32) u32;
 extern fn dom_on(handle: u32, ptr: u32, len: u32, addr: u32) void;
 
 // ---- memory ----
-const MEM_SIZE = 0x8800;
+const MEM_SIZE = 0x24300;
 var mem: [MEM_SIZE]u8 = undefined;
 const BYTECODE_OFF = 0x1000;
 const STACK_OFF = 0x3000;
@@ -28,9 +37,13 @@ const STACK_ENTRIES = 256;
 const STATE_OFF = 0x3800;
 const STATE_ENTRIES = 64;
 const NAME_CAP = 32;
-const VAL_CAP = 256;
-const SCRATCH_OFF = 0x8000;
-const SCRATCH_CAP = 0x800;
+const STATE_STRIDE = NAME_CAP + 4 + 4 + 4; // name[32], ptr, len, cap = 44
+const HEAP_OFF = 0x4300;
+const HEAP_CAP = 0x10000;
+const HEAP_END = HEAP_OFF + HEAP_CAP;
+const HEAP_MIN = 16;
+const SCRATCH_OFF = 0x14300;
+const SCRATCH_CAP = 0x10000;
 const MAX_DEPTH = 32;
 const MAX_STEPS = 1000000;
 
@@ -45,6 +58,8 @@ var depth: u32 = 0;
 var steps: u32 = 0;
 var sp: u32 = 0;
 var scratch_top: u32 = SCRATCH_OFF;
+var heap_top: u32 = HEAP_OFF;
+var free_head: u32 = 0;
 var ip: u32 = 0;
 var bytecode_len: u32 = 0;
 
@@ -98,6 +113,8 @@ fn sliceEq(a: []const u8, b: []const u8) bool {
 }
 
 fn isNum(s: []const u8) bool {
+    // mirrors the JS VM's RE_NUM = /^-?\d+(\.\d+)?$/ : a trailing or bare dot
+    // ("5.", ".5") is NOT numeric; a leading "-" needs >= 1 digit before any dot
     if (s.len == 0) return false;
     var i: usize = 0;
     if (s[0] == '-') {
@@ -106,11 +123,14 @@ fn isNum(s: []const u8) bool {
     }
     var digits: usize = 0;
     while (i < s.len and std.ascii.isDigit(s[i])) : (i += 1) digits += 1;
+    if (digits == 0) return false;
     if (i < s.len and s[i] == '.') {
         i += 1;
-        while (i < s.len and std.ascii.isDigit(s[i])) : (i += 1) digits += 1;
+        var frac: usize = 0;
+        while (i < s.len and std.ascii.isDigit(s[i])) : (i += 1) frac += 1;
+        if (frac == 0) return false;
     }
-    return digits > 0 and i == s.len;
+    return i == s.len;
 }
 
 fn fmtFloat(x: f64, out: []u8) usize {
@@ -135,11 +155,55 @@ fn scratchWrite(s: []const u8) ?u32 {
     return p;
 }
 
+// Heap blocks: [size: u32][payload...]; payload starts at block + 8.
+// Free blocks reuse the first 8 bytes as [size: u32][next_free: u32].
+// Returns the payload pointer and its usable payload capacity (>= max(n, 16)).
+fn heapAlloc(n: usize) ?struct { ptr: u32, cap: u32 } {
+    const rounded: u32 = @intCast(@max(n, HEAP_MIN));
+    var prev: u32 = 0;
+    var cur = free_head;
+    while (cur != 0) {
+        const size = std.mem.readInt(u32, mem[cur..][0..4], .little);
+        const next = std.mem.readInt(u32, mem[cur + 4 ..][0..4], .little);
+        if (size >= rounded) {
+            if (prev == 0) free_head = next else std.mem.writeInt(u32, mem[prev + 4 ..][0..4], next, .little);
+            return .{ .ptr = cur + 8, .cap = size };
+        }
+        prev = cur;
+        cur = next;
+    }
+    if (heap_top + 8 + rounded > HEAP_END) return null;
+    const p = heap_top;
+    std.mem.writeInt(u32, mem[p..][0..4], rounded, .little);
+    heap_top = p + 8 + rounded;
+    return .{ .ptr = p + 8, .cap = rounded };
+}
+
+fn heapFree(payload_ptr: u32) void {
+    if (payload_ptr == 0) return;
+    const hdr = payload_ptr - 8;
+    const size = std.mem.readInt(u32, mem[hdr..][0..4], .little);
+    std.mem.writeInt(u32, mem[hdr..][0..4], size, .little);
+    std.mem.writeInt(u32, mem[hdr + 4 ..][0..4], free_head, .little);
+    free_head = hdr;
+}
+
+fn entryBase(i: u32) u32 {
+    return STATE_OFF + i * STATE_STRIDE;
+}
+
+fn entryField(e: u32, off: u32) u32 {
+    return std.mem.readInt(u32, mem[e + off ..][0..4], .little);
+}
+
+fn setEntryField(e: u32, off: u32, v: u32) void {
+    std.mem.writeInt(u32, mem[e + off ..][0..4], v, .little);
+}
+
 fn stateFind(name: []const u8) ?u32 {
     var i: u32 = 0;
     while (i < STATE_ENTRIES) : (i += 1) {
-        const b_ = STATE_OFF + i * (NAME_CAP + VAL_CAP);
-        const stored = memSlice(b_, NAME_CAP);
+        const stored = memSlice(entryBase(i), NAME_CAP);
         if (std.mem.indexOfScalar(u8, stored, 0)) |z| {
             if (sliceEq(stored[0..z], name)) return i;
         }
@@ -147,31 +211,65 @@ fn stateFind(name: []const u8) ?u32 {
     return null;
 }
 
-fn stateStore(name: []const u8, val: []const u8) void {
+fn stateLoad(name: []const u8) struct { ptr: u32, len: u32 } {
+    if (stateFind(name)) |idx| {
+        const e = entryBase(idx);
+        return .{ .ptr = entryField(e, NAME_CAP), .len = entryField(e, NAME_CAP + 4) };
+    }
+    return .{ .ptr = 0, .len = 0 };
+}
+
+fn copyEntryName(e: u32, name: []const u8) void {
+    const n = @min(name.len, NAME_CAP - 1);
+    @memset(memSlice(e, NAME_CAP), 0);
+    @memcpy(memSlice(e, n), name[0..n]);
+}
+
+fn stateStore(name: []const u8, val: []const u8) bool {
     const idx = stateFind(name) orelse blk: {
         var i: u32 = 0;
         while (i < STATE_ENTRIES) : (i += 1) {
-            const b_ = STATE_OFF + i * (NAME_CAP + VAL_CAP);
-            if (mem[b_] == 0) break :blk i;
+            if (mem[entryBase(i)] == 0) break :blk i;
         }
-        return; // state full: drop silently (documented limit)
+        return false; // state table full: loud failure
     };
-    const b_ = STATE_OFF + idx * (NAME_CAP + VAL_CAP);
-    @memset(memSlice(b_, NAME_CAP + VAL_CAP), 0);
-    const n = @min(name.len, NAME_CAP - 1);
-    @memcpy(memSlice(b_, n), name[0..n]);
-    const v = @min(val.len, VAL_CAP - 1);
-    @memcpy(memSlice(b_ + NAME_CAP, v), val[0..v]);
+    const e = entryBase(idx);
+    var ptr = entryField(e, NAME_CAP);
+    const cap = entryField(e, NAME_CAP + 8);
+    if (ptr == 0 or cap < val.len) {
+        if (ptr != 0) heapFree(ptr);
+        const blk = heapAlloc(val.len) orelse {
+            setEntryField(e, NAME_CAP, 0);
+            setEntryField(e, NAME_CAP + 4, 0);
+            setEntryField(e, NAME_CAP + 8, 0);
+            return false;
+        };
+        ptr = blk.ptr;
+        setEntryField(e, NAME_CAP, blk.ptr);
+        setEntryField(e, NAME_CAP + 8, blk.cap);
+    }
+    if (val.len > 0) @memcpy(mem[ptr .. ptr + val.len], val);
+    setEntryField(e, NAME_CAP + 4, @intCast(val.len));
+    copyEntryName(e, name);
+    return true;
 }
 
-fn stateLoad(name: []const u8) []const u8 {
-    if (stateFind(name)) |idx| {
-        const b_ = STATE_OFF + idx * (NAME_CAP + VAL_CAP);
-        const stored = memSlice(b_ + NAME_CAP, VAL_CAP);
-        if (std.mem.indexOfScalar(u8, stored, 0)) |z| return stored[0..z];
-        return stored;
-    }
-    return "";
+fn stateStoreAdopt(name: []const u8, ptr: u32, len: u32, cap: u32) bool {
+    const idx = stateFind(name) orelse blk: {
+        var i: u32 = 0;
+        while (i < STATE_ENTRIES) : (i += 1) {
+            if (mem[entryBase(i)] == 0) break :blk i;
+        }
+        return false; // state table full: loud failure
+    };
+    const e = entryBase(idx);
+    const old = entryField(e, NAME_CAP);
+    if (old != 0 and old != ptr) heapFree(old);
+    setEntryField(e, NAME_CAP, ptr);
+    setEntryField(e, NAME_CAP + 4, len);
+    setEntryField(e, NAME_CAP + 8, cap);
+    copyEntryName(e, name);
+    return true;
 }
 
 fn getStr() ?[]const u8 {
@@ -232,21 +330,37 @@ fn run(entry: u32) u32 {
             10 => break, // HALT
             11, 27 => { // EXTRACT_TEXT / EXTRACT_VALUE
                 const name = strPayload(&ip) orelse { err = ERR_OPCODE; break; };
-                const cap = VAL_CAP - 1;
-                const dest = scratchAlloc(cap) orelse { err = ERR_OPCODE; break; };
-                const n = dom_get_text(cur_sel, if (op == 11) 0 else 1, base() + dest, cap);
-                stateStore(memSlice(name.ptr, name.len), memSlice(dest, n));
+                // extract heap-direct: double the buffer while dom_get_text
+                // returns a full block (possible truncation); the doubling
+                // loop terminates when cap exceeds the 64 KiB heap (loud)
+                var cap: usize = 4096;
+                while (true) {
+                    const blk = heapAlloc(cap) orelse { err = ERR_OPCODE; break; };
+                    const n = dom_get_text(cur_sel, if (op == 11) 0 else 1, base() + blk.ptr, blk.cap);
+                    if (n < blk.cap) {
+                        if (!stateStoreAdopt(memSlice(name.ptr, name.len), blk.ptr, n, blk.cap)) {
+                            heapFree(blk.ptr);
+                            err = ERR_OPCODE;
+                            break;
+                        }
+                        break;
+                    }
+                    // exactly full: possibly truncated — retry with 2x
+                    heapFree(blk.ptr);
+                    cap *= 2;
+                    if (cap > HEAP_CAP) { err = ERR_OPCODE; break; }
+                }
             },
-            12 => { // PUSH_VAR
+            12 => { // PUSH_VAR (copies the value into scratch so the operand
+                // stack never holds heap pointers — stores can free blocks)
                 const v = getStr() orelse { err = ERR_OPCODE; break; };
-                if (stateFind(v)) |idx| {
-                    const b_ = STATE_OFF + idx * (NAME_CAP + VAL_CAP);
-                    const stored = memSlice(b_ + NAME_CAP, VAL_CAP);
-                    const vlen = if (std.mem.indexOfScalar(u8, stored, 0)) |z| z else stored.len;
-                    if (!push(b_ + NAME_CAP, @intCast(vlen))) { err = ERR_OPCODE; break; }
-                } else {
+                const st = stateLoad(v);
+                if (st.ptr == 0 or st.len == 0) {
                     const p = scratchWrite("") orelse { err = ERR_OPCODE; break; };
                     if (!push(p, 0)) { err = ERR_OPCODE; break; }
+                } else {
+                    const p = scratchWrite(memSlice(st.ptr, st.len)) orelse { err = ERR_OPCODE; break; };
+                    if (!push(p, st.len)) { err = ERR_OPCODE; break; }
                 }
             },
             13 => { // CMP_STR
@@ -264,17 +378,20 @@ fn run(entry: u32) u32 {
             15 => { // STORE_VAR
                 const v = getStr() orelse { err = ERR_OPCODE; break; };
                 const val = pop();
-                stateStore(v, memSlice(val.ptr, val.len));
+                if (!stateStore(v, memSlice(val.ptr, val.len))) { err = ERR_OPCODE; break; }
             },
             16 => { // INC
                 const v = getStr() orelse { err = ERR_OPCODE; break; };
                 const cur = stateLoad(v);
-                if (!isNum(cur)) { err = ERR_NONNUM; break; }
-                const x = std.fmt.parseFloat(f64, cur) catch { err = ERR_NONNUM; break; };
+                const cur_s = if (cur.ptr == 0) "" else memSlice(cur.ptr, cur.len);
+                if (!isNum(cur_s)) { err = ERR_NONNUM; break; }
+                const x = std.fmt.parseFloat(f64, cur_s) catch { err = ERR_NONNUM; break; };
                 if (!std.math.isFinite(x + 1)) { err = ERR_NONNUM; break; }
-                var tmp: [64]u8 = undefined;
+                // 400: the longest decimal expansion of any finite f64 is
+                // 309 digits + sign; 400 covers all finite values
+                var tmp: [400]u8 = undefined;
                 const n = fmtFloat(x + 1, &tmp);
-                stateStore(v, tmp[0..n]);
+                if (!stateStore(v, tmp[0..n])) { err = ERR_OPCODE; break; }
             },
             17 => { // ADD_NUM (JS + semantics)
                 const b = pop();
@@ -284,7 +401,7 @@ fn run(entry: u32) u32 {
                 if (binNum(as, bs)) |x| {
                     const y = std.fmt.parseFloat(f64, bs) catch 0;
                     if (!std.math.isFinite(x + y)) { err = ERR_NONNUM; break; }
-                    var tmp: [64]u8 = undefined;
+                    var tmp: [400]u8 = undefined;
                     const n = fmtFloat(x + y, &tmp);
                     const p = scratchWrite(tmp[0..n]) orelse { err = ERR_OPCODE; break; };
                     if (!push(p, n)) { err = ERR_OPCODE; break; }
@@ -300,7 +417,7 @@ fn run(entry: u32) u32 {
                 if (binNum(memSlice(a.ptr, a.len), memSlice(b.ptr, b.len))) |x| {
                     const y = std.fmt.parseFloat(f64, memSlice(b.ptr, b.len)) catch 0;
                     if (!std.math.isFinite(x - y)) { err = ERR_NONNUM; break; }
-                    var tmp: [64]u8 = undefined;
+                    var tmp: [400]u8 = undefined;
                     const n = fmtFloat(x - y, &tmp);
                     const p = scratchWrite(tmp[0..n]) orelse { err = ERR_OPCODE; break; };
                     if (!push(p, n)) { err = ERR_OPCODE; break; }
