@@ -3,6 +3,7 @@
 // Frame: preamble 0xAA x64, u32le length, payload, CRC-32/ISO-HDLC.
 // Phase-continuous carrier: tone phase carries across bit boundaries.
 const std = @import("std");
+const flate = std.compress.flate;
 
 const SAMPLE_RATE: u32 = 19200;
 const MARK_HZ: f64 = 1200.0;
@@ -209,6 +210,38 @@ pub fn interleave16(allocator: std.mem.Allocator, blocks: []const [RS_N]u8) !std
     return wire;
 }
 
+// gzip payload path (v2 audio relay): std.compress.flate with the .gzip
+// container, zlib-default level 6. NOTE (zig 0.16.0): the flate DECOMPRESSOR
+// parses the gzip trailer but does not verify it — WrongGzipChecksum /
+// WrongGzipSize are declared in the Container error set but never raised —
+// so gunzip() verifies CRC-32/ISIZE itself (crc32IsoHdlc IS the gzip CRC-32:
+// same reflected 0xEDB88320 polynomial, init/xorout 0xFFFFFFFF).
+// Compress.init asserts a >= 8-byte output buffer (Allocating grows) and a
+// >= max_window_len (64 KB) window; the Compress struct itself is ~224 KB.
+pub fn gzip(allocator: std.mem.Allocator, data: []const u8) ![]u8 {
+    var out = try std.Io.Writer.Allocating.initCapacity(allocator, 128);
+    defer out.deinit();
+    var window: [flate.max_window_len]u8 = undefined;
+    var c = try flate.Compress.init(&out.writer, &window, .gzip, .level_6);
+    try c.writer.writeAll(data);
+    try c.finish();
+    return out.toOwnedSlice();
+}
+
+pub fn gunzip(allocator: std.mem.Allocator, data: []const u8) ![]u8 {
+    var in: std.Io.Reader = .fixed(data);
+    var out: std.Io.Writer.Allocating = .init(allocator);
+    defer out.deinit();
+    var d = flate.Decompress.init(&in, .gzip, &.{});
+    _ = try d.reader.streamRemaining(&out.writer);
+    const footer = data[in.seek - 8 .. in.seek];
+    const want_crc = std.mem.readInt(u32, footer[0..4], .little);
+    const want_size = std.mem.readInt(u32, footer[4..8], .little);
+    if (crc32IsoHdlc(out.written()) != want_crc) return error.WrongGzipChecksum;
+    if (@as(u32, @truncate(out.written().len)) != want_size) return error.WrongGzipSize;
+    return out.toOwnedSlice();
+}
+
 test "crc32 iso-hdlc test vector" {
     try std.testing.expectEqual(@as(u32, 0xCBF43926), crc32IsoHdlc("123456789"));
 }
@@ -265,6 +298,56 @@ test "rs encode matches js parity for full data vector" {
         for (cw) |byte| y = gfMul(y, gfPow(2, @intCast(i))) ^ byte;
         try std.testing.expectEqual(@as(u8, 0), y);
     }
+}
+
+test "gzip emits the 1f 8b 08 header" {
+    const gz = try gzip(std.testing.allocator, "hi");
+    defer std.testing.allocator.free(gz);
+    try std.testing.expectEqual(@as(u8, 0x1f), gz[0]);
+    try std.testing.expectEqual(@as(u8, 0x8b), gz[1]);
+    try std.testing.expectEqual(@as(u8, 0x08), gz[2]);
+}
+
+fn gzipRoundTrip(payload: []const u8) !void {
+    const gz = try gzip(std.testing.allocator, payload);
+    defer std.testing.allocator.free(gz);
+    const back = try gunzip(std.testing.allocator, gz);
+    defer std.testing.allocator.free(back);
+    try std.testing.expectEqualSlices(u8, payload, back);
+}
+
+test "gzip round-trip: empty and 1-byte payloads" {
+    try gzipRoundTrip("");
+    try gzipRoundTrip("x");
+}
+
+test "gzip round-trip: 40 KB pseudo-random payload" {
+    var data: [40 * 1024]u8 = undefined;
+    var s: u32 = 0x9E3779B9;
+    for (&data) |*b| {
+        s ^= s << 13;
+        s ^= s >> 17;
+        s ^= s << 5;
+        b.* = @truncate(s);
+    }
+    try gzipRoundTrip(&data);
+}
+
+test "gzip round-trip: 40 KB repetitive payload, compresses hard" {
+    const data: [40 * 1024]u8 = @splat('a');
+    try gzipRoundTrip(&data);
+    const gz = try gzip(std.testing.allocator, &data);
+    defer std.testing.allocator.free(gz);
+    try std.testing.expect(gz.len < 1024);
+}
+
+test "gunzip rejects corrupted trailer bytes" {
+    const gz = try gzip(std.testing.allocator, "hello hello hello");
+    defer std.testing.allocator.free(gz);
+    gz[gz.len - 1] ^= 0xFF;
+    try std.testing.expectError(error.WrongGzipSize, gunzip(std.testing.allocator, gz));
+    gz[gz.len - 5] ^= 0xFF;
+    try std.testing.expectError(error.WrongGzipChecksum, gunzip(std.testing.allocator, gz));
 }
 
 test "interleave16 wire order row-major" {

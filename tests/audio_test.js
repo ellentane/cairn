@@ -3,7 +3,7 @@
 const fs = require("fs");
 const path = require("path");
 const { execFileSync } = require("child_process");
-const { decodeWavBytes, crc32, demodIQ } = require("../src/decoder.js");
+const { decodeWavBytes, crc32, demodIQ, gunzipSync } = require("../src/decoder.js");
 
 let failures = 0;
 function check(name, cond) {
@@ -31,7 +31,43 @@ const decoded = decodeWavBytes(wav);
 check("audio round-trip byte equality", Buffer.compare(Buffer.from(decoded), page) === 0);
 check("decode.html generated", fs.existsSync(path.join(path.dirname(wavPath), "decode.html")));
 
-// 3. I/Q quadrature demod: the decision must be invariant to carrier phase.
+// 3. v2 gzip payload path, cross-inflate checkpoint: the zig encoder is the
+// only gzip producer, node zlib the consumer. gzprobe (stdin -> gzip ->
+// stdout, zig-out/bin) is a `zig build gzprobe` artifact; rebuild it so the
+// test always exercises the current audio.zig.
+execFileSync("zig", ["build", "gzprobe"], { stdio: "pipe" });
+const zlib = require("zlib");
+const gzprobe = path.join(root, "zig-out/bin/gzprobe");
+function zigGzip(buf) {
+  return execFileSync(gzprobe, [], { input: buf });
+}
+function xorshift32(seed, len) {
+  let s = seed >>> 0;
+  const b = Buffer.alloc(len);
+  for (let i = 0; i < len; i++) {
+    s ^= (s << 13) >>> 0; s >>>= 0;
+    s ^= s >>> 17;
+    s ^= (s << 5) >>> 0; s >>>= 0;
+    b[i] = s & 0xff;
+  }
+  return b;
+}
+const payloads = {
+  "empty payload": Buffer.alloc(0),
+  "1-byte payload": Buffer.from([0x42]),
+  "40 KB pseudo-random payload": xorshift32(0x9E3779B9, 40 * 1024),
+  "example page": page,
+};
+for (const [name, original] of Object.entries(payloads)) {
+  const zigGz = zigGzip(original);
+  check(`zig gzip header is 1f 8b 08 (${name})`, zigGz[0] === 0x1f && zigGz[1] === 0x8b && zigGz[2] === 0x08);
+  check(`zig gzip -> node gunzipSync (${name})`, Buffer.compare(zlib.gunzipSync(zigGz), original) === 0);
+  check(`decoder.gunzipSync seam (${name})`, Buffer.compare(Buffer.from(gunzipSync(zigGz)), original) === 0);
+}
+const pageGz = zigGzip(page);
+check("example page compresses below half size", pageGz.length < page.length / 2);
+
+// 4. I/Q quadrature demod: the decision must be invariant to carrier phase.
 // v1's |sin-only| correlator flips at phi=pi/2 (proven in the v2 audit) — this
 // test exists to prove the fix and prevent regression.
 // 12 spb @ 19200: 1600 Bd, tones 1200 (mark) / 2000 (space)

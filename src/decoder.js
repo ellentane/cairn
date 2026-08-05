@@ -303,8 +303,23 @@
     return out;
   }
 
+  // v2 gzip inflate seam (node): zlib.gunzipSync — NOT inflateSync, which
+  // rejects the gzip container header. The browser path arrives with
+  // decode.html (Task 8) via DecompressionStream('gzip'), which is
+  // async-only — hence the split: sync decodeFrame + this sync inflate seam
+  // in node, async inflate in the browser.
+  let _gunzip = null;
+  if (typeof require !== "undefined") {
+    const zlib = require("zlib");
+    _gunzip = (bytes) => new Uint8Array(zlib.gunzipSync(Buffer.from(bytes)));
+  }
+  function gunzipSync(bytes) {
+    if (_gunzip === null) throw new Error("gunzipSync is node-only; decode.html uses DecompressionStream");
+    return _gunzip(bytes);
+  }
+
   const api = {
-    decodeWavBytes, crc32, demodIQ,
+    decodeWavBytes, crc32, demodIQ, gunzipSync,
     rs: { encode: rsEncode, decode: rsDecode, deinterleave, gfMul, N: RS_N, K: RS_K, NSYM: RS_NSYM },
   };
   if (typeof module !== "undefined" && module.exports) module.exports = api;

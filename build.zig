@@ -14,6 +14,25 @@ pub fn build(b: *std.Build) void {
     });
     b.installArtifact(exe);
 
+    // stdin -> gzip -> stdout probe for the node cross-inflate test
+    // (audio_test.js runs `zig build gzprobe`); build artifact only — not on
+    // the default install step, never attached to releases.
+    const gzprobe = b.addExecutable(.{
+        .name = "gzprobe",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tools/gzprobe.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    gzprobe.root_module.addImport("audio", b.createModule(.{
+        .root_source_file = b.path("src/audio.zig"),
+        .target = target,
+        .optimize = optimize,
+    }));
+    const gzprobe_step = b.step("gzprobe", "Build the stdin->gzip probe");
+    gzprobe_step.dependOn(&b.addInstallArtifact(gzprobe, .{}).step);
+
     const tests = b.addTest(.{
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/lib.zig"),
