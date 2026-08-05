@@ -14,7 +14,12 @@ const bc = require("./bytecode.js");
 
 const OP = bc.OPCODES;
 
-const LONG_TEXT = "the quick brown fox jumps over the lazy dog";
+// long-value coverage: extracts and STORE_VAR values that exceed the old
+// 255-byte value cap — the heap-backed wasm VM must round-trip them in full
+const LONG_SENT = "the quick brown fox jumps over the lazy dog";
+const LONG_TEXT = (LONG_SENT + " ").repeat(7); // 308 chars, ~300
+const LONG_TEXT2 = "0123456789".repeat(200); // 2000 chars
+const STORE_TEXT = "stored-value-literal-0123456789-".repeat(10); // 310 chars
 
 function MockClassList(node) { this.node = node; this.set = new Set(); }
 MockClassList.prototype.add = function (c) { this.set.add(c); };
@@ -288,13 +293,21 @@ scenario("6: while + comparators + extract_value + set_text(expr)", () => new bc
   .byte(OP.PUSH_SELECTOR).str("#longsrc").byte(OP.GET_NODES).byte(OP.EXTRACT_TEXT).str("long")
   .byte(OP.PUSH_VAR).str("long")
   .byte(OP.PUSH_SELECTOR).str("#longout").byte(OP.GET_NODES).byte(OP.SET_TEXT_POP)
+  .byte(OP.PUSH_SELECTOR).str("#longsrc2").byte(OP.GET_NODES).byte(OP.EXTRACT_TEXT).str("long2")
+  .byte(OP.PUSH_VAR).str("long2")
+  .byte(OP.PUSH_SELECTOR).str("#longout2").byte(OP.GET_NODES).byte(OP.SET_TEXT_POP)
+  .byte(OP.PUSH_STR).str(STORE_TEXT)
+  .byte(OP.STORE_VAR).str("big")
+  .byte(OP.PUSH_VAR).str("big")
+  .byte(OP.PUSH_SELECTOR).str("#storeout").byte(OP.GET_NODES).byte(OP.SET_TEXT_POP)
   .byte(OP.HALT).finish(),
   (f, progs) => {
     const [prog] = progs;
-    const [dj, dw] = makePair(["btn", "mid", "out", "res", "inp", "ge", "le", "gt", "ne", "longsrc", "longout"],
+    const [dj, dw] = makePair(["btn", "mid", "out", "res", "inp", "ge", "le", "gt", "ne", "longsrc", "longout", "longsrc2", "longout2", "storeout"],
       (a, b) => {
         a.nodes.inp.value = "7"; b.nodes.inp.value = "7";
         a.nodes.longsrc.textContent = LONG_TEXT; b.nodes.longsrc.textContent = LONG_TEXT;
+        a.nodes.longsrc2.textContent = LONG_TEXT2; b.nodes.longsrc2.textContent = LONG_TEXT2;
       });
     bootBoth(f, "S6", prog, dj, dw);
     step(f, "S6 boot", dj, dw);
@@ -309,6 +322,10 @@ scenario("6: while + comparators + extract_value + set_text(expr)", () => new bc
     expectEq(f, "S6 #ne (v!=7)", dj.nodes.ne.textContent, "ne-ok");
     expectEq(f, "S6 #longout (full " + LONG_TEXT.length + " chars)", dj.nodes.longout.textContent, LONG_TEXT);
     expectEq(f, "S6 #longout wasm", dw.nodes.longout.textContent, LONG_TEXT);
+    expectEq(f, "S6 #longout2 (full " + LONG_TEXT2.length + " chars)", dj.nodes.longout2.textContent, LONG_TEXT2);
+    expectEq(f, "S6 #longout2 wasm", dw.nodes.longout2.textContent, LONG_TEXT2);
+    expectEq(f, "S6 #storeout (STORE_VAR read-back, full " + STORE_TEXT.length + " chars)", dj.nodes.storeout.textContent, STORE_TEXT);
+    expectEq(f, "S6 #storeout wasm", dw.nodes.storeout.textContent, STORE_TEXT);
     dj.nodes.inp.value = "2";
     dw.nodes.inp.value = "2";
     fireBoth(f, "S6 click #btn (inp=2)", dj, dw, "btn", "click");
@@ -321,6 +338,8 @@ scenario("6: while + comparators + extract_value + set_text(expr)", () => new bc
     expectEq(f, "S6 #gt (v>5)", dj.nodes.gt.textContent, "gt-fail");
     expectEq(f, "S6 #ne (v!=7)", dj.nodes.ne.textContent, "ne-fail");
     expectEq(f, "S6 #longout (2nd) wasm", dw.nodes.longout.textContent, LONG_TEXT);
+    expectEq(f, "S6 #longout2 (2nd) wasm", dw.nodes.longout2.textContent, LONG_TEXT2);
+    expectEq(f, "S6 #storeout (2nd) wasm", dw.nodes.storeout.textContent, STORE_TEXT);
   });
 
 // 7. formatter alignment (§5.2): 0.1 + 0.2 must render the same decimal in

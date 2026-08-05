@@ -57,6 +57,10 @@
       off += 8 + len;
     }
     if (dataOff < 0) throw new Error("no data chunk");
+    // clamp a lying data chunk length: real wavs may carry trailing chunks,
+    // so an over-claiming length just yields fewer samples (frame parse
+    // reports "frame truncated" / CRC mismatch); never allocate past the file
+    if (dataOff + dataLen > wavBytes.length) dataLen = wavBytes.length - dataOff;
     let samples;
     if (dataOff % 2 === 0) {
       samples = new Int16Array(wavBytes.buffer, wavBytes.byteOffset + dataOff, Math.floor(dataLen / 2));
