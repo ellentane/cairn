@@ -28,6 +28,21 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
+    strategy:
+      matrix:
+        include:
+          - target: x86_64-linux-gnu
+            asset: cairn-linux-x86_64
+          - target: x86_64-linux-musl
+            asset: cairn-linux-musl-x86_64
+          - target: aarch64-linux-musl
+            asset: cairn-linux-musl-aarch64
+          - target: x86_64-windows
+            asset: cairn-windows-x86_64.exe
+          - target: x86_64-macos
+            asset: cairn-macos-x86_64
+          - target: aarch64-macos
+            asset: cairn-macos-aarch64
     steps:
       - uses: actions/checkout@v4
         with:
@@ -35,8 +50,12 @@ jobs:
       - uses: goto-bus-stop/setup-zig@v2
         with:
           version: 0.16.0
-      - run: zig build
-      - run: cp zig-out/bin/cairn cairn-linux-x86_64
+      - run: zig build -Dtarget=${{ matrix.target }}
+      - name: Stage binary
+        run: |
+          BIN=zig-out/bin/cairn
+          [ -f "$BIN.exe" ] && BIN="$BIN.exe"
+          mv "$BIN" "${{ matrix.asset }}"
       - name: Collect commits since the previous tag
         id: notes
         run: |
@@ -54,6 +73,9 @@ jobs:
       - uses: softprops/action-gh-release@v2
         with:
           body: ${{ steps.notes.outputs.notes }}
-          files: |
-            cairn-linux-x86_64
-            zig-out/bin/vm_wasm.wasm
+          files: ${{ matrix.asset }}
+      - name: Upload wasm artifact
+        if: matrix.target == 'x86_64-linux-gnu'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: zig-out/bin/vm_wasm.wasm
