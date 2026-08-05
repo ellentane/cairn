@@ -138,6 +138,7 @@
   const V2_GROUP_LEN = 16 * 255; // wire bytes per interleave group (depth x RS block)
 
   class WavParseError extends Error { constructor(m) { super(m); this.name = "WavParseError"; } }
+  class UnsupportedFormat extends Error { constructor(m) { super(m); this.name = "UnsupportedFormat"; } }
   class SyncNotFound extends Error { constructor(m) { super(m); this.name = "SyncNotFound"; } }
   class RSCorrectionFailed extends Error { constructor(m) { super(m); this.name = "RSCorrectionFailed"; } }
   class CRCError extends Error { constructor(m) { super(m); this.name = "CRCError"; } }
@@ -147,13 +148,15 @@
       throw new WavParseError("not a RIFF wav");
     }
     const view = new DataView(wavBytes.buffer, wavBytes.byteOffset, wavBytes.byteLength);
-    let off = 12, dataOff = -1, dataLen = 0, sr = 0, channels = 1;
+    let off = 12, dataOff = -1, dataLen = 0, sr = 0, channels = 1, formatTag = 1, bits = 16;
     while (off + 8 <= wavBytes.length) {
       const id = String.fromCharCode(wavBytes[off], wavBytes[off + 1], wavBytes[off + 2], wavBytes[off + 3]);
       const len = view.getUint32(off + 4, true);
       if (id === "fmt " && len >= 16) {
+        formatTag = view.getUint16(off + 8, true);
         channels = view.getUint16(off + 10, true);
         sr = view.getUint32(off + 12, true);
+        bits = view.getUint16(off + 22, true);
       } else if (id === "data") {
         dataOff = off + 8;
         dataLen = len;
@@ -164,11 +167,24 @@
     if (dataOff < 0) throw new WavParseError("no data chunk");
     if (dataOff + dataLen > wavBytes.length) dataLen = wavBytes.length - dataOff;
     if (sr <= 0) throw new WavParseError("fmt chunk missing sample rate");
-    // mono assumption: keep channel 0 of an interleaved stream; the strided
-    // getInt16 read is parity-safe regardless of data chunk offset
-    const n = Math.floor(Math.floor(dataLen / 2) / channels);
+    // Format handling: PCM (tag 1) in 8 or 16 bits decodes; float (tag 3) and
+    // other encodings/depths are rejected with a classified error rather than
+    // converted — phone memo apps record PCM, and the browser path (Task 8)
+    // transcodes everything else via decodeAudioData before decodeFrame.
+    if (formatTag !== 1) {
+      throw new UnsupportedFormat(`unsupported format tag ${formatTag} (PCM expected)`);
+    }
+    if (bits !== 8 && bits !== 16) {
+      throw new UnsupportedFormat(`unsupported bit depth ${bits} (8/16-bit PCM expected)`);
+    }
+    // keep channel 0 of an interleaved stream (strided reads are parity-safe
+    // regardless of data chunk offset); 8-bit unsigned maps to 16-bit signed
+    const bytesPerSample = bits === 8 ? 1 : 2;
+    const n = Math.floor(Math.floor(dataLen / bytesPerSample) / channels);
     const samples = new Int16Array(n);
-    if (dataOff % 2 === 0 && channels === 1) {
+    if (bits === 8) {
+      for (let i = 0; i < n; i++) samples[i] = ((wavBytes[dataOff + i * channels] & 0xff) - 128) << 8;
+    } else if (dataOff % 2 === 0 && channels === 1) {
       samples.set(new Int16Array(wavBytes.buffer, wavBytes.byteOffset + dataOff, n));
     } else {
       for (let i = 0; i < n; i++) samples[i] = view.getInt16(dataOff + i * channels * 2, true);
@@ -217,7 +233,7 @@
   function learnToneScales(samples, sr, spb, tones, offset, syncStart) {
     const markBits = [], spaceBits = [];
     for (let j = 0; j < PREAMBLE_BYTES * 8; j++) {
-      const t = offset + j * spb;
+      const t = offset + (syncStart - PREAMBLE_BYTES * 8 + j) * spb;
       if (t + spb > samples.length) break;
       let mI = 0, mQ = 0, sI = 0, sQ = 0;
       for (let s = 0; s < spb; s++) {
@@ -584,7 +600,7 @@
 
   const api = {
     decodeWavBytes, crc32, demodIQ, gunzipSync, decodeFrame,
-    errors: { WavParseError, SyncNotFound, RSCorrectionFailed, CRCError },
+    errors: { WavParseError, UnsupportedFormat, SyncNotFound, RSCorrectionFailed, CRCError },
     rs,
   };
   if (typeof module !== "undefined" && module.exports) module.exports = api;

@@ -76,11 +76,12 @@ function xorshift32(seed, len) {
 }
 
 // rebuild a wav around resampled (or sliced) samples, keeping the v2 header
-function rebuildWav(samples) {
+function rebuildWav(samples, sr) {
+  sr = sr || 19200;
   const hdr = Buffer.alloc(44);
   hdr.write("RIFF", 0); hdr.writeUInt32LE(36 + samples.length * 2, 4); hdr.write("WAVE", 8);
   hdr.write("fmt ", 12); hdr.writeUInt32LE(16, 16); hdr.writeUInt16LE(1, 20); hdr.writeUInt16LE(1, 22);
-  hdr.writeUInt32LE(19200, 24); hdr.writeUInt32LE(38400, 28); hdr.writeUInt16LE(2, 32); hdr.writeUInt16LE(16, 34);
+  hdr.writeUInt32LE(sr, 24); hdr.writeUInt32LE(sr * 2, 28); hdr.writeUInt16LE(2, 32); hdr.writeUInt16LE(16, 34);
   hdr.write("data", 36); hdr.writeUInt32LE(samples.length * 2, 40);
   const out = Buffer.alloc(44 + samples.length * 2);
   hdr.copy(out, 0);
@@ -233,7 +234,86 @@ for (const run of runs) {
   check("corrupted preamble bytes -> decodes", bytesEqual(gunzipSync(pGot.compressed), run.payload.data));
 }
 
-// 4. wavprobe CLI errors
+// 4. fmt-aware decoding (Task 5): sample rate, channels, bit depth, containers
+{
+  const run = runs[2]; // 40 KB pseudo-random, radio profile
+  const wav = encodeV2(run.payload.data, run.profileName);
+  const mono = samplesOf(wav);
+
+  // 4a/4b. recorder sample rates: linear resample keeps the physical tone
+  // frequencies; spb becomes fractional (44.1k: 27.5625) or integral (48k: 30.0)
+  for (const sr of [44100, 48000]) {
+    const rt = rebuildWav(resample(mono, sr / 19200), sr);
+    const got = decodeFrame(rt);
+    check(`${sr} Hz wav -> exact payload`, bytesEqual(gunzipSync(got.compressed), run.payload.data));
+  }
+
+  // 4a-extra. 44.1 kHz + 100 ppm recorder drift: fractional spb and the
+  // re-anchoring tracker together
+  {
+    const rt = rebuildWav(resample(mono, (44100 / 19200) * 1.0001), 44100);
+    const got = decodeFrame(rt);
+    check("44.1 kHz wav + 100 ppm drift -> exact payload", bytesEqual(gunzipSync(got.compressed), run.payload.data));
+  }
+
+  // 4c. stereo wav: channel 0 carries the frame, channel 1 is uncorrelated
+  // noise -> demux must recover channel 0 exactly
+  let nx = 0x12345678;
+  const noise = new Int16Array(mono.length);
+  for (let i = 0; i < noise.length; i++) {
+    nx ^= (nx << 13) >>> 0; nx ^= nx >>> 17; nx ^= (nx << 5) >>> 0; nx >>>= 0;
+    noise[i] = nx & 0xFFFF;
+  }
+  const stBuf = Buffer.alloc(44 + mono.length * 4);
+  stBuf.write("RIFF", 0); stBuf.writeUInt32LE(36 + mono.length * 4, 4); stBuf.write("WAVE", 8);
+  stBuf.write("fmt ", 12); stBuf.writeUInt32LE(16, 16); stBuf.writeUInt16LE(1, 20); stBuf.writeUInt16LE(2, 22);
+  stBuf.writeUInt32LE(19200, 24); stBuf.writeUInt32LE(19200 * 4, 28); stBuf.writeUInt16LE(4, 32); stBuf.writeUInt16LE(16, 34);
+  stBuf.write("data", 36); stBuf.writeUInt32LE(mono.length * 4, 40);
+  for (let i = 0; i < mono.length; i++) {
+    stBuf.writeInt16LE(mono[i], 44 + i * 4);
+    stBuf.writeInt16LE(noise[i], 44 + i * 4 + 2);
+  }
+  const stereoGot = decodeFrame(stBuf);
+  check("stereo wav (ch0 frame, ch1 noise) -> exact payload", bytesEqual(gunzipSync(stereoGot.compressed), run.payload.data));
+
+  // 4d. 8-bit PCM (unsigned): parseWav converts to 16-bit signed
+  const u8Buf = Buffer.alloc(44 + mono.length);
+  u8Buf.write("RIFF", 0); u8Buf.writeUInt32LE(36 + mono.length, 4); u8Buf.write("WAVE", 8);
+  u8Buf.write("fmt ", 12); u8Buf.writeUInt32LE(16, 16); u8Buf.writeUInt16LE(1, 20); u8Buf.writeUInt16LE(1, 22);
+  u8Buf.writeUInt32LE(19200, 24); u8Buf.writeUInt32LE(19200, 28); u8Buf.writeUInt16LE(1, 32); u8Buf.writeUInt16LE(8, 34);
+  u8Buf.write("data", 36); u8Buf.writeUInt32LE(mono.length, 40);
+  for (let i = 0; i < mono.length; i++) u8Buf.writeUInt8((mono[i] >> 8) + 128, 44 + i);
+  let u8Got = null;
+  try { u8Got = decodeFrame(u8Buf); } catch (e) { u8Got = e; }
+  check("8-bit PCM wav -> exact payload", u8Got !== null && u8Got.profile !== undefined &&
+    bytesEqual(gunzipSync(u8Got.compressed), run.payload.data));
+
+  // 4e. float wav (format tag 3): classified error, never garbage. Decision:
+  // reject rather than convert — phone memo apps record PCM, and the browser
+  // path (Task 8) transcodes everything else via decodeAudioData
+  const flBuf = Buffer.alloc(44 + mono.length * 4);
+  flBuf.write("RIFF", 0); flBuf.writeUInt32LE(36 + mono.length * 4, 4); flBuf.write("WAVE", 8);
+  flBuf.write("fmt ", 12); flBuf.writeUInt32LE(16, 16); flBuf.writeUInt16LE(3, 20); flBuf.writeUInt16LE(1, 22);
+  flBuf.writeUInt32LE(19200, 24); flBuf.writeUInt32LE(19200 * 4, 28); flBuf.writeUInt16LE(4, 32); flBuf.writeUInt16LE(32, 34);
+  flBuf.write("data", 36); flBuf.writeUInt32LE(mono.length * 4, 40);
+  for (let i = 0; i < mono.length; i++) flBuf.writeFloatLE(mono[i] / 32768, 44 + i * 4);
+  let threw = null;
+  try { decodeFrame(flBuf); } catch (e) { threw = e; }
+  check("float wav -> classified UnsupportedFormat error", threw !== null && threw.name === "UnsupportedFormat");
+
+  // 4f. non-RIFF container (m4a/mp3 style): classified WavParseError
+  threw = null;
+  try { decodeFrame(Buffer.from([0x00, 0x00, 0x00, 0x20, 0x66, 0x74, 0x79, 0x70, 0x4D, 0x34, 0x41, 0x20])); } catch (e) { threw = e; }
+  check("m4a/mp3 container -> classified WavParseError", threw !== null && threw.name === "WavParseError");
+
+  // 4g. go cue replaced with silence: sync search must not depend on it
+  const noCue = samplesOf(wav);
+  noCue.fill(0, 0, 28800);
+  const noCueGot = decodeFrame(rebuildWav(noCue));
+  check("go cue replaced with silence -> exact payload", bytesEqual(gunzipSync(noCueGot.compressed), run.payload.data));
+}
+
+// 5. wavprobe CLI errors
 try {
   execFileSync(wavprobe, ["nope"], { input: Buffer.alloc(0), stdio: "pipe" });
   check("wavprobe rejects unknown profile", false);
