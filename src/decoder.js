@@ -286,8 +286,11 @@
   }
 
   // Row-major inverse of the wire map: wire position b*depth + k -> codeword
-  // k, byte index b. blocks = bytes.length / blockLen (partial groups of fewer
-  // than `depth` codewords are laid out in the first slots of each row).
+  // k, byte index b. blocks = bytes.length / blockLen. Partial groups (fewer
+  // than `depth` codewords) round-trip only if the encoder zero-pads them to a
+  // full depth*blockLen wire (the wire map reserves depth slots per row); the
+  // padding codewords come back as zero codewords and decode to 223 zero
+  // bytes.
   function deinterleave(bytes, depth, blockLen) {
     if (bytes.length % blockLen !== 0) throw new Error("wire length not a multiple of blockLen");
     const count = bytes.length / blockLen;
@@ -300,7 +303,10 @@
     return out;
   }
 
-  const api = { decodeWavBytes, crc32, demodIQ, rsEncode, rsDecode, deinterleave, gfMul, gfExp, gfLog };
+  const api = {
+    decodeWavBytes, crc32, demodIQ,
+    rs: { encode: rsEncode, decode: rsDecode, deinterleave, gfMul, N: RS_N, K: RS_K, NSYM: RS_NSYM },
+  };
   if (typeof module !== "undefined" && module.exports) module.exports = api;
   else root.CairnDecoder = api;
 })(typeof self !== "undefined" ? self : this);

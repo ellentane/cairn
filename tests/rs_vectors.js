@@ -12,16 +12,20 @@
 // Vector 1: data = 223 bytes (i*7+3) & 0xff, parity pinned below (32 bytes).
 // Vector 2: corrupted = vector-1 codeword with 8 errors injected at
 // errorPositions, each byte flipped with ^ 0x5A.
+// Vector 3: data2 = 223 bytes (i*13+7) & 0xff, parity pinned below — a second
+// independent encode pin (catches e.g. an encoder that is accidentally
+// byte-identical to vector 1 only by coincidence).
 //
-// The pinned parity was produced by the following auditable Python generator
-// (hand-rolled GF(256), reedsolo-convention encoder), then cross-validated:
+// The pinned parities were produced by the following auditable Python
+// generator (hand-rolled GF(256), reedsolo-convention encoder), then
+// cross-validated:
 //   - byte-identical to reedsolo.rs_encode_msg(data, 32, fcr=0, generator=2)
-//     after reedsolo.init_tables() (prim 0x11D), and
+//     after reedsolo.init_tables() (prim 0x11D), for both vectors, and
 //   - the decode path was fuzz-tested against reedsolo.rs_correct_msg on 200
 //     random 1..16-error patterns (all agree).
 //
 // ---------------------------------------------------------------------------
-// Python generator (the exact code that produced `parity`):
+// Python generator (the exact code that produced `parity` and `parity2`):
 //
 //   PRIM = 0x11D; NSYM = 32; N = 255; K = N - NSYM
 //   exp = [0] * 512; log = [0] * 256
@@ -52,9 +56,10 @@
 //       out[:len(msg)] = msg   # synthetic division clobbers the message region
 //       return out             # data || parity
 //
-//   data = bytes((i * 7 + 3) & 0xFF for i in range(K))
-//   cw = rs_encode(data)
-//   parity = cw[K:]
+//   data  = bytes((i *  7 + 3) & 0xFF for i in range(K))
+//   data2 = bytes((i * 13 + 7) & 0xFF for i in range(K))
+//   parity  = rs_encode(data)[K:]
+//   parity2 = rs_encode(data2)[K:]
 // ---------------------------------------------------------------------------
 
 const K = 223; // data bytes
@@ -75,6 +80,19 @@ const parity = Uint8Array.from([
   187, 30, 222, 146, 76, 130, 254, 114, 123, 65, 163, 215, 127, 99, 237, 65,
 ]);
 
+// Vector 3 data: 223 bytes (i*13+7) & 0xff
+function data2Vector() {
+  const d = new Uint8Array(K);
+  for (let i = 0; i < K; i++) d[i] = (i * 13 + 7) & 0xff;
+  return d;
+}
+
+// Pinned parity for vector 3 (auditable via the generator above).
+const parity2 = Uint8Array.from([
+  192, 41, 160, 57, 52, 134, 244, 107, 116, 52, 221, 238, 177, 126, 17, 184,
+  190, 10, 93, 175, 42, 149, 242, 227, 218, 73, 90, 20, 164, 233, 166, 172,
+]);
+
 // Vector 2: error positions injected into the vector-1 codeword (flip ^ 0x5A).
 const errorPositions = [10, 50, 90, 130, 170, 210, 215, 220];
 
@@ -87,4 +105,4 @@ function corruptedCodeword() {
   return cw;
 }
 
-module.exports = { K, N, NSYM, dataVector, parity, errorPositions, corruptedCodeword };
+module.exports = { K, N, NSYM, dataVector, data2Vector, parity, parity2, errorPositions, corruptedCodeword };

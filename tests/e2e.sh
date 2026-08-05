@@ -39,6 +39,9 @@ node tests/wasm_equiv.js --check-ops
 echo "== audio round-trip =="
 node tests/audio_test.js
 
+echo "== rs codec =="
+node tests/rs_test.js
+
 echo "== last box (Node smoke) =="
 node tests/showcase_smoke.js index.html
 

@@ -122,7 +122,7 @@ const RS_N: usize = 255;
 const RS_K: usize = 223;
 const RS_NSYM: usize = 32;
 
-const gf_exp: [512]u8 = blk: {
+const GF_EXP: [512]u8 = blk: {
     var exp: [512]u8 = undefined;
     var x: u16 = 1;
     var i: usize = 0;
@@ -136,28 +136,28 @@ const gf_exp: [512]u8 = blk: {
     break :blk exp;
 };
 
-const gf_log: [256]u8 = blk: {
+const GF_LOG: [256]u8 = blk: {
     var log: [256]u8 = undefined;
     var i: usize = 0;
     while (i < 255) : (i += 1) {
-        log[gf_exp[i]] = @intCast(i);
+        log[GF_EXP[i]] = @intCast(i);
     }
     break :blk log;
 };
 
 fn gfMul(a: u8, b: u8) u8 {
     if (a == 0 or b == 0) return 0;
-    return gf_exp[@as(usize, gf_log[a]) + gf_log[b]];
+    return GF_EXP[@as(usize, GF_LOG[a]) + GF_LOG[b]];
 }
 
 fn gfPow(a: u8, p: i32) u8 {
-    const e: i32 = @as(i32, gf_log[a]) * p;
+    const e: i32 = @as(i32, GF_LOG[a]) * p;
     const m: i32 = @mod(e, 255);
-    return gf_exp[@intCast(m)];
+    return GF_EXP[@intCast(m)];
 }
 
 // generator polynomial g(x) = prod (x - alpha^i), i in 0..31, highest-degree-first
-const rs_gen: [RS_NSYM + 1]u8 = blk: {
+const RS_GEN: [RS_NSYM + 1]u8 = blk: {
     @setEvalBranchQuota(100000);
     var g: [RS_NSYM + 1]u8 = .{0} ** (RS_NSYM + 1);
     var len: usize = 1;
@@ -187,7 +187,7 @@ pub fn rsEncode(data: []const u8) [RS_N]u8 {
         if (coef != 0) {
             var j: usize = 1;
             while (j <= RS_NSYM) : (j += 1) {
-                out[i + j] ^= gfMul(rs_gen[j], coef);
+                out[i + j] ^= gfMul(RS_GEN[j], coef);
             }
         }
     }
@@ -224,9 +224,9 @@ test "wav structure" {
 }
 
 test "rs gf tables are self-consistent" {
-    try std.testing.expectEqual(@as(u8, 1), gf_exp[255]);
-    for (0..255) |i| try std.testing.expectEqual(@as(u8, @intCast(i)), gf_log[gf_exp[i]]);
-    for (1..256) |v| try std.testing.expectEqual(@as(u8, @intCast(v)), gf_exp[gf_log[v]]);
+    try std.testing.expectEqual(@as(u8, 1), GF_EXP[255]);
+    for (0..255) |i| try std.testing.expectEqual(@as(u8, @intCast(i)), GF_LOG[GF_EXP[i]]);
+    for (1..256) |v| try std.testing.expectEqual(@as(u8, @intCast(v)), GF_EXP[GF_LOG[v]]);
 }
 
 test "rs encode parity matches pinned vector 1 (tests/rs_vectors.js)" {
@@ -239,6 +239,18 @@ test "rs encode parity matches pinned vector 1 (tests/rs_vectors.js)" {
     const cw = rsEncode(&data);
     try std.testing.expectEqualSlices(u8, &pinned, cw[RS_K..RS_N]);
     try std.testing.expectEqualSlices(u8, &data, cw[0..RS_K]);
+}
+
+test "rs encode parity matches pinned vector 3 data2 (tests/rs_vectors.js)" {
+    const pinned2 = [32]u8{
+        192, 41, 160, 57, 52, 134, 244, 107, 116, 52, 221, 238, 177, 126, 17, 184,
+        190, 10, 93, 175, 42, 149, 242, 227, 218, 73, 90, 20, 164, 233, 166, 172,
+    };
+    var data2: [RS_K]u8 = undefined;
+    for (0..RS_K) |i| data2[i] = @intCast((i * 13 + 7) & 0xff);
+    const cw = rsEncode(&data2);
+    try std.testing.expectEqualSlices(u8, &pinned2, cw[RS_K..RS_N]);
+    try std.testing.expectEqualSlices(u8, &data2, cw[0..RS_K]);
 }
 
 test "rs encode matches js parity for full data vector" {
