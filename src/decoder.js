@@ -81,7 +81,39 @@
     return payload;
   }
 
-  const api = { decodeWavBytes, crc32 };
+  // Quadrature I/Q correlation demod (v2): for each bit window of `spb`
+  // (fractional allowed — the window start accumulates exactly `spb` per bit,
+  // so integer spb is exact), correlate against each tone with sin AND cos
+  // oscillators and take |c| = sqrt(I^2 + Q^2). Decision: the tone with the
+  // largest magnitude. Amplitude-invariant (AGC-proof); phase-invariant
+  // (radio chains inject arbitrary carrier phase). Returns bit values:
+  // tones[0] (mark) = 1, tones[1] (space) = 0, per the v1 convention.
+  function demodIQ(samples, cfg) {
+    const { sr, spb, tones } = cfg;
+    const out = [];
+    let t = 0;
+    while (t + spb <= samples.length + 1e-9) {
+      const mags = tones.map(() => 0);
+      for (let k = 0; k < tones.length; k++) {
+        let I = 0, Q = 0;
+        const f = tones[k];
+        const win = Math.min(spb, samples.length - t);
+        for (let s = 0; s < win; s++) {
+          const tt = Math.floor(t + s);
+          I += samples[tt] * Math.cos(2 * Math.PI * f * tt / sr);
+          Q += samples[tt] * Math.sin(2 * Math.PI * f * tt / sr);
+        }
+        mags[k] = Math.hypot(I, Q);
+      }
+      let best = 0;
+      for (let k = 1; k < tones.length; k++) if (mags[k] > mags[best]) best = k;
+      out.push(best === 0 ? 1 : 0);
+      t += spb;
+    }
+    return out;
+  }
+
+  const api = { decodeWavBytes, crc32, demodIQ };
   if (typeof module !== "undefined" && module.exports) module.exports = api;
   else root.CairnDecoder = api;
 })(typeof self !== "undefined" ? self : this);
