@@ -1,0 +1,12 @@
+{
+  "profiles": [
+    { "name": "clean", "tone_low": 1200, "tone_high": 2400, "samples_per_bit": 8 },
+    { "name": "radio", "tone_low": 1200, "tone_high": 2000, "samples_per_bit": 12 }
+  ],
+  "sync_word": 3551088215,
+  "preamble_bytes": 96,
+  "go_cue_hz": 400, "go_cue_secs": 1.5,
+  "stop_tone_hz": 800, "stop_tone_secs": 0.5,
+  "sample_rate": 19200,
+  "rs_data_block": 223, "rs_block": 255, "interleave_depth": 16
+}

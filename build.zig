@@ -33,6 +33,25 @@ pub fn build(b: *std.Build) void {
     const gzprobe_step = b.step("gzprobe", "Build the stdin->gzip probe");
     gzprobe_step.dependOn(&b.addInstallArtifact(gzprobe, .{}).step);
 
+    // stdin + profile name -> frame-v2 wav probe (tests/link_profiles_test.js
+    // runs `zig build wavprobe`); build artifact only — not on the default
+    // install step, never attached to releases.
+    const wavprobe = b.addExecutable(.{
+        .name = "wavprobe",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tools/wavprobe.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    wavprobe.root_module.addImport("audio", b.createModule(.{
+        .root_source_file = b.path("src/audio.zig"),
+        .target = target,
+        .optimize = optimize,
+    }));
+    const wavprobe_step = b.step("wavprobe", "Build the stdin+profile->wav probe");
+    wavprobe_step.dependOn(&b.addInstallArtifact(wavprobe, .{}).step);
+
     const tests = b.addTest(.{
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/lib.zig"),

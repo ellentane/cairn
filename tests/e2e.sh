@@ -42,6 +42,9 @@ node tests/audio_test.js
 echo "== rs codec =="
 node tests/rs_test.js
 
+echo "== link profiles + frame-v2 =="
+node tests/link_profiles_test.js
+
 echo "== last box (Node smoke) =="
 node tests/showcase_smoke.js index.html
 
