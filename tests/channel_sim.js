@@ -17,10 +17,12 @@
 //      (20..80 ms, +-0.5 FS uniform) at a seeded spot in the data region
 //   6. FM-threshold impulse clicks: 0..5 per trial, 1..3 samples at
 //      +-(0.5..1.0) FS
-//   7. reverb: 2-tap echo, delays 10..40 ms, gains 0.3 / 0.15 — DISABLED
-//      (gains 0), see "measured constraints" below
+//   7. reverb: 2-tap echo, delays 10..40 ms, gains 0.3 / 0.15 — enabled at
+//      the spec'd gains since Task 6b-1; the radio gate fails at these gains
+//      (data-region wall, see "measured constraints") — the gains stay as
+//      parameters so the sweep can be re-run
 //   8. recorder clock offset: resample by (1 + eps), eps uniform +-PPM_MAX
-//      (linear interpolation) — spec'd +-100 ppm, see constraints below
+//      (linear interpolation) — spec'd +-100 ppm, enabled since Task 6b-1
 //   9. AWGN at configurable SNR, noise RMS calibrated to the active-region
 //      signal RMS (unit-variance gaussian table, fixed seed; per-trial
 //      odd-stride decimation keeps trials decorrelated and cheap)
@@ -45,22 +47,31 @@
 //   A measures exactly 3% and the 3rd exactly 1.5% of the fundamental.
 //
 // Measured constraints (decoder-side; the gate below is the contract):
-// - Reverb: the decoder's sync search requires an EXACT 32-bit sync match.
-//   Any echo lands the preamble's reflection inside the sync window (delays
-//   10..40 ms = 16..64 bits) and corrupts it: measured >= 25% SyncNotFound
-//   at 0.05 tap gain and ~45% frame failures at the spec'd 0.3/0.15 even on
-//   clean (unchanneled) wavs. The echo stage is implemented (gains are
-//   parameters) but defaults to 0; re-enabling needs tracker hardening.
-// - Clock: the decoder's sync search requires an EXACT 32-bit sync match on
-//   one of two phase grids. Any nonzero clock offset moves the sync off the
-//   grid phases and flips marginal sync bits (measured +3..10% frame failures
-//   at +-1..5 ppm, 15..50% at +-10..100 ppm; 0 ppm -> ~3% floor). The spec'd
-//   +-100 ppm is unreachable with the current decoder; the stage is
-//   parameterized (PPM_MAX) and defaults to 0.
+// - Reverb: an echo at the spec'd 0.3/0.15 gains lands the preamble's
+//   reflection inside the sync window (delays 10..40 ms = 16..64 bits) and
+//   corrupts it — measured >= 25% SyncNotFound at 0.05 tap gain and ~45%
+//   frame failures at 0.3/0.15 even on clean wavs, with an exact-match sync
+//   search. The Task 6b-1 decoder accepts a sync match with up to 8 bit
+//   errors (Hamming distance <= 8, 4 demod grids), which absorbs the echo's
+//   sync corruption; false locks are rejected by CRC validation + rescan.
+// - Reverb vs the data region (the binding constraint): the echo's delayed
+//   copy (0.3/0.15) flips ~0.5-2% of the radio profile's bit decisions at
+//   ANY demod phase (measured: even at the perfect phase trajectory with the
+//   true clock factor, only ~25-30% of trials stay under the RS(255,223)
+//   error capacity of ~0.6% bit errors). The radio gate therefore fails at
+//   the spec'd gains: measured FER 94.5% at 0.3/0.15 vs 24.5% at 0.1/0.05,
+//   7% at 0.05/0.025 and 8.5% at 0 echo (all with +-100 ppm clock, 25 dB,
+//   the hardened decoder). The gate budget is only met at echo gains
+//   <= ~0.05. clean is unaffected (0% FER through 0.1/0.05; 3% at 0.2/0.1).
+// - Clock: any nonzero clock offset moves the sync off the demod phase grids
+//   and flips marginal sync bits (+3..10% frame failures at +-1..5 ppm with
+//   an exact match). The tolerance above plus the drift tracker (128-bit
+//   decision-directed probes, 4-grid sync start) hold the spec'd +-100 ppm:
+//   measured 8.5% radio / 0% clean at 100 ppm with no echo.
 // - FER floor at 25 dB (~3%): the AGC's 2 ms attack lags tone transitions
-//   and drops the arriving tone's level for 1-2 symbols; the exact-match
-//   sync search then misses ~3% of trials. This is the model's honest floor;
-//   the gate's 5% budget absorbs it.
+//   and drops the arriving tone's level for 1-2 symbols; the sync search
+//   then misses ~3% of trials. This is the model's honest floor; the gate's
+//   5% budget absorbs it.
 // - clean vs radio: clean DECODES BETTER than radio everywhere (0/60 vs
 //   2/60 at 25 dB) — the 3% 1:2-ratio harmonic spur is far below the
 //   correlator decision margin, and the clean profile's flat phase curve
@@ -85,9 +96,9 @@ const H2 = 0.06 / TONE_AMP;     // 3% 2nd harmonic of a TONE_AMP tone
 const H3 = 0.06 / (TONE_AMP * TONE_AMP); // 1.5% 3rd harmonic
 const AGC_TARGET = 0.5;
 const BURST_AMP = 0.5;          // squelch-close noise burst level (+-FS)
-const ECHO1 = 0.0;              // reverb tap gains (0 = disabled, see above)
-const ECHO2 = 0.0;
-const PPM_MAX = 0;              // recorder clock offset, +-ppm (see above)
+const ECHO1 = 0.3;              // reverb tap gains (spec values, Task 6b-1)
+const ECHO2 = 0.15;
+const PPM_MAX = 100;            // recorder clock offset, +-ppm (spec value)
 const GAUSS_N = 1 << 20;
 
 const DEFAULT_TRIALS = 200;
@@ -241,9 +252,10 @@ function squelchClicks(s, p) {
 }
 
 // ---------- stage 7: reverb (2-tap echo, circular delay line) ----------
-// Gains default to 0: any nonzero echo corrupts the decoder's exact-match
-// sync search (measured >= 25% SyncNotFound at 0.05 taps). Kept as a
-// parameterized stage for the Task 6b sweep.
+// Enabled at the spec'd gains since Task 6b-1: the tolerant sync search
+// (Hamming <= 8) absorbs the echo's sync corruption, but the echo's data-
+// region interference exceeds the RS(255,223) capacity for the radio profile
+// at 25 dB (see "measured constraints" above). Gains remain parameters.
 function reverb(s, p) {
   if (ECHO1 <= 0 && ECHO2 <= 0) return s;
   const n = s.length;

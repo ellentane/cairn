@@ -313,7 +313,43 @@ for (const run of runs) {
   check("go cue replaced with silence -> exact payload", bytesEqual(gunzipSync(noCueGot.compressed), run.payload.data));
 }
 
-// 5. wavprobe CLI errors
+// 5a. sync search tolerance (Task 6b-1): the sync word may arrive with up to
+// 8 bit errors (echo reflections and clock-offset phase shifts land inside
+// the sync window); the decoder must accept matches within the tolerance but
+// keep rejecting worse ones. Bits are flipped by writing the OPPOSITE tone
+// into the bit's sample window, so the demodulated bit provably flips
+// regardless of content.
+{
+  const SR = 19200, spb = 12; // radio profile encoder constants
+  const SYNC_WORD = 0xD3A94E57;
+  const syncStart = SR * 1.5 + 96 * 8 * spb; // go cue + preamble
+  const wav = encodeV2(payloads[0].data, "radio"); // small payload, fast decode
+
+  function flipSyncBits(buf, bits) {
+    const out = Buffer.from(buf);
+    for (const b of bits) {
+      const bitVal = (SYNC_WORD >> (31 - b)) & 1;
+      const toneHz = bitVal === 1 ? 2000 : 1200; // opposite of the transmitted tone
+      const sample = syncStart + b * spb;
+      for (let s = 0; s < spb; s++) {
+        out.writeInt16LE(Math.round(12000 * Math.sin(2 * Math.PI * toneHz * s / SR)), 44 + (sample + s) * 2);
+      }
+    }
+    return out;
+  }
+
+  for (const [name, bits] of [["1 bit error", [3]], ["2 bit errors", [3, 17]], ["3 bit errors", [3, 17, 25]]]) {
+    let got = null;
+    try { got = decodeFrame(flipSyncBits(wav, bits)); } catch (e) { got = e; }
+    check(`sync word with ${name} -> decodes`, got !== null && got.profile !== undefined &&
+      bytesEqual(gunzipSync(got.compressed), payloads[0].data));
+  }
+  let threw = null;
+  try { decodeFrame(flipSyncBits(wav, [3, 7, 11, 15, 19, 23, 27, 30, 1, 5])); } catch (e) { threw = e; }
+  check("sync word with 10 bit errors -> SyncNotFound", threw !== null && threw.name === "SyncNotFound");
+}
+
+// 6. wavprobe CLI errors
 try {
   execFileSync(wavprobe, ["nope"], { input: Buffer.alloc(0), stdio: "pipe" });
   check("wavprobe rejects unknown profile", false);

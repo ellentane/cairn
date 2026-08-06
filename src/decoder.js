@@ -134,6 +134,7 @@
     { name: "radio", tone_low: 1200, tone_high: 2000, samples_per_bit: 12 },
   ];
   const SYNC_WORD = 0xD3A94E57;
+  const SYNC_TOLERANCE = 8; // accept a sync match with up to 8 bit errors
   const PREAMBLE_BYTES = 96;
   const V2_GROUP_LEN = 16 * 255; // wire bytes per interleave group (depth x RS block)
 
@@ -192,20 +193,31 @@
     return { sr, samples };
   }
 
-  // Sync search at 2x oversampling: demodulate the stream on two phase grids
-  // (offset 0 and spb/2) and scan each for the sync word. Candidates must pass
-  // the preamble gate (>=4 of the 8 bytes before the sync are 0xAA). Returns
-  // the ordered candidate list (best preamble-correlation score first) — the
-  // decoder tries them in order and rescans on decode failure.
+  function popcount32(x) {
+    x = x - ((x >>> 1) & 0x55555555);
+    x = (x & 0x33333333) + ((x >>> 2) & 0x33333333);
+    x = (x + (x >>> 4)) & 0x0F0F0F0F;
+    return (x * 0x01010101) >>> 24;
+  }
+
+  // Sync search at 4x oversampling: demodulate the stream on four phase grids
+  // (0, spb/4, spb/2, 3*spb/4) and scan each for the sync word. Matches tolerate
+  // up to SYNC_TOLERANCE bit errors (echo reflections and clock-offset phase
+  // shifts land inside the sync window) and must pass the preamble gate (>=3
+  // of the 8 bytes before the sync are 0xAA). The denser grid pins the initial
+  // demod phase to within spb/8 samples of the true optimum (which the radio
+  // chain shifts off the encoder grid by a few samples); the decoder tries
+  // candidates in order (best preamble-correlation score first) and rescans on
+  // decode failure.
   function findSyncCandidates(samples, sr, spb, tones) {
     const candidates = [];
-    for (const offset of [0, spb / 2]) {
+    for (const offset of [0, spb / 4, spb / 2, (3 * spb) / 4]) {
       const bits = demodIQAt(samples, { sr, spb, tones }, offset);
       let win = 0;
       for (let p = 0; p < bits.length; p++) {
         win = ((win << 1) | bits[p]) >>> 0;
         if (p < 31) continue;
-        if (win !== SYNC_WORD) continue;
+        if (popcount32(win ^ SYNC_WORD) > SYNC_TOLERANCE) continue;
         const syncStart = p - 31;
         if (syncStart < PREAMBLE_BYTES * 8) continue;
         let aa = 0;
@@ -214,7 +226,7 @@
           for (let k = 0; k < 8; k++) byte = (byte << 1) | bits[syncStart - 64 + b * 8 + k];
           if (byte === 0xAA) aa++;
         }
-        if (aa < 4) continue;
+        if (aa < 3) continue;
         let score = 0;
         for (let j = 0; j < PREAMBLE_BYTES * 8; j++) {
           if (bits[syncStart - PREAMBLE_BYTES * 8 + j] === (j % 2 === 0 ? 1 : 0)) score++;
@@ -278,21 +290,30 @@
 
   const ANCHOR_BITS = 512;      // re-anchor the sampling phase every N bits
   const PROBE_OFFSETS = [-2, -1, 0, 1, 2]; // candidate phase corrections (samples)
-  const PROBE_BITS = 64;        // probe window length in bits
+  const PROBE_BITS = 128;       // probe window length in bits
 
-  // Measure the best integer-sample phase correction at time t: correlate a
-  // PROBE_BITS-bit window at each candidate offset and pick the one with the
-  // largest summed winning-tone magnitude. Runs every ANCHOR_BITS bits so the
+  // Measure the best integer-sample phase correction at time t, decision-
+  // directed: take the per-bit tone decisions at the current phase, then for
+  // each candidate offset sum the correlation of the DECIDED tone over the
+  // probe window. Summing the decided tone (not max of both) makes the metric
+  // monotonic in the phase error — the max() form cancels at bit boundaries
+  // because the winning tone switches, which is why a magnitude-max probe is
+  // blind on the radio chain (measured <1% over +-4 samples vs ~0.5-1% per
+  // sample for the decision-directed form). Runs every ANCHOR_BITS bits so the
   // sampling phase tracks ~100 ppm recorder clock drift.
   function probePhase(samples, sr, spb, tones, normalize, t) {
+    const dec = [];
+    for (let b = 0; b < PROBE_BITS; b++) {
+      const c0 = winCorrC(samples, sr, tones[0], t + b * spb, spb, normalize, 0);
+      const c1 = winCorrC(samples, sr, tones[1], t + b * spb, spb, normalize, 1);
+      dec.push(c0.mag >= c1.mag ? 0 : 1);
+    }
     let best = 0, bestSum = -1, zeroSum = -1;
     for (const off of PROBE_OFFSETS) {
       let sum = 0;
       for (let b = 0; b < PROBE_BITS; b++) {
-        const tt = t + off + b * spb;
-        const c0 = winCorrC(samples, sr, tones[0], tt, spb, normalize, 0);
-        const c1 = winCorrC(samples, sr, tones[1], tt, spb, normalize, 1);
-        sum += c0.mag >= c1.mag ? c0.mag : c1.mag;
+        const c = winCorrC(samples, sr, tones[dec[b]], t + off + b * spb, spb, normalize, dec[b]);
+        sum += c.mag;
       }
       if (off === 0) zeroSum = sum;
       if (sum > bestSum) { bestSum = sum; best = off; }
@@ -301,8 +322,8 @@
     // margin: with tones that are sub-harmonics of the bit rate (the clean
     // profile's 0.5/1.0 cycles per bit) the correlation is flat across window
     // shifts (measured < 0.1%), and blind corrections would walk the phase
-    // away. The radio profile's misalignment signal is ~1%, so 0.3% separates
-    // the two.
+    // away. The radio profile's misalignment signal is ~1% per sample, so
+    // 0.3% separates the two.
     if (best !== 0 && bestSum < zeroSum * 1.003) return 0;
     return best;
   }
