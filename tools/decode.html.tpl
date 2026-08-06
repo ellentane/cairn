@@ -58,26 +58,30 @@ pre{background:#f4f4f4;padding:1em;overflow:auto;max-height:20em}
     return s16;
   }
 
+  function showDecoded(payload, stats) {
+    out.textContent = new TextDecoder().decode(payload);
+    download.hidden = false;
+    download.href = URL.createObjectURL(new Blob([payload], { type: "text/html" }));
+    download.download = "decoded.html";
+    var statsText = "";
+    if (stats) {
+      var parts = [];
+      if (typeof stats.syncSnr === "number" && isFinite(stats.syncSnr)) {
+        parts.push("sync SNR " + stats.syncSnr.toFixed(1) + " dB");
+      }
+      if (Array.isArray(stats.rsCorrections)) {
+        var n = 0;
+        for (var i = 0; i < stats.rsCorrections.length; i++) if (stats.rsCorrections[i] > 0) n++;
+        parts.push(n + " codewords corrected");
+      }
+      if (parts.length) statsText = ", " + parts.join(", ");
+    }
+    show("Decoded " + payload.length + " bytes, CRC verified" + statsText + ".");
+  }
+
   function decodeToPage(res) {
     return inflateGzip(res.compressed).then(function (payload) {
-      out.textContent = new TextDecoder().decode(payload);
-      download.hidden = false;
-      download.href = URL.createObjectURL(new Blob([payload], { type: "text/html" }));
-      download.download = "decoded.html";
-      var statsText = "";
-      if (res.stats) {
-        var parts = [];
-        if (typeof res.stats.syncSnr === "number" && isFinite(res.stats.syncSnr)) {
-          parts.push("sync SNR " + res.stats.syncSnr.toFixed(1) + " dB");
-        }
-        if (Array.isArray(res.stats.rsCorrections)) {
-          var n = 0;
-          for (var i = 0; i < res.stats.rsCorrections.length; i++) if (res.stats.rsCorrections[i] > 0) n++;
-          parts.push(n + " codewords corrected");
-        }
-        if (parts.length) statsText = ", " + parts.join(", ");
-      }
-      show("Decoded " + payload.length + " bytes, CRC verified" + statsText + ".");
+      showDecoded(payload, res.stats);
     }).catch(function () {
       show("decompression failed.");
     });
@@ -133,85 +137,107 @@ pre{background:#f4f4f4;padding:1em;overflow:auto;max-height:20em}
     this.textContent = loopOn ? "loop: on" : "loop: off";
   });
 
-  // mic path (best-effort): stream samples through the same demodulator
-  var micState = null;
+  // mic path (v2): gapless capture into an AudioWorklet (ScriptProcessor
+  // fallback for old browsers), record-then-decode when the toggle is pressed
+  // again. The decoder runs on the context's native sample rate — the frame
+  // spb is derived from it, so no resampling and no demod here.
+  var mic = null;
+  var micChunkLen = 4096;
+  var micCapSec = 5 * 60;
+  var micWorkletUrl = URL.createObjectURL(new Blob([(
+    "class CairnCapture extends AudioWorkletProcessor {" +
+    "  constructor() { super(); this.buf = new Float32Array(" + micChunkLen + "); this.n = 0; }" +
+    "  process(inputs) {" +
+    "    var ch = inputs[0] && inputs[0][0];" +
+    "    if (ch) for (var i = 0; i < ch.length; i++) {" +
+    "      this.buf[this.n++] = ch[i];" +
+    "      if (this.n === this.buf.length) { this.port.postMessage(this.buf); this.n = 0; }" +
+    "    }" +
+    "    return true;" +
+    "  }" +
+    "}" +
+    "registerProcessor('cairn-capture', CairnCapture);"
+  )], { type: "application/javascript" }));
+
+  function micAccumulate(chunk) {
+    if (!mic) return;
+    mic.chunks.push(chunk);
+    mic.total += chunk.length;
+    // bound memory at ~5 minutes: drop the oldest chunk(s)
+    while (mic.total > mic.cap && mic.chunks.length > 1) mic.total -= mic.chunks.shift().length;
+  }
+
+  function micFallback(src) {
+    var sp = audioCtx.createScriptProcessor(0, 1, 1);
+    sp.onaudioprocess = function (e) { micAccumulate(e.inputBuffer.getChannelData(0).slice()); };
+    src.connect(sp);
+    sp.connect(audioCtx.destination);
+    mic.node = sp;
+  }
+
+  function micStart(stream) {
+    audioCtx = audioCtx || new (window.AudioContext || window.webkitAudioContext)();
+    mic = {
+      stream: stream, chunks: [], total: 0, rate: audioCtx.sampleRate,
+      cap: micCapSec * audioCtx.sampleRate, t0: Date.now(),
+    };
+    document.getElementById("mic").textContent = "Stop microphone";
+    show("Listening… (recording 0.0s) — stop when the transmission ends");
+    mic.timer = setInterval(function () {
+      if (!mic) { clearInterval(mic.timer); return; }
+      show("Listening… (recording " + ((Date.now() - mic.t0) / 1000).toFixed(1) + "s) — stop when the transmission ends");
+    }, 500);
+    var src = audioCtx.createMediaStreamSource(stream);
+    if (audioCtx.audioWorklet && window.AudioWorkletNode) {
+      return audioCtx.audioWorklet.addModule(micWorkletUrl).then(function () {
+        if (!mic) return;
+        var node = new window.AudioWorkletNode(audioCtx, "cairn-capture");
+        node.port.onmessage = function (e) { micAccumulate(e.data); };
+        src.connect(node);
+        node.connect(audioCtx.destination);
+        mic.node = node;
+      }).catch(function () { if (mic) micFallback(src); });
+    }
+    micFallback(src);
+  }
+
+  function micStop() {
+    var m = mic;
+    mic = null;
+    clearInterval(m.timer);
+    document.getElementById("mic").textContent = "Start microphone decode";
+    m.stream.getTracks().forEach(function (t) { t.stop(); });
+    if (m.node && m.node.disconnect) m.node.disconnect();
+    if (m.total === 0) { show("Nothing recorded."); return; }
+    var flat = new Float32Array(m.total);
+    var off = 0;
+    for (var i = 0; i < m.chunks.length; i++) { flat.set(m.chunks[i], off); off += m.chunks[i].length; }
+    show("Decoding " + (m.total / m.rate).toFixed(1) + "s of captured audio…");
+    var res;
+    try {
+      res = CairnDecoder.decodeFrameSamples(int16FromFloat32(flat), m.rate);
+    } catch (e) {
+      show(errorText(e));
+      return;
+    }
+    return inflateGzip(res.compressed).then(function (payload) {
+      showDecoded(payload, res.stats);
+    }).catch(function () {
+      show("decompression failed.");
+    });
+  }
+
   document.getElementById("mic").addEventListener("click", function () {
-    if (micState) { micState.analyser = null; micState = null; show("Microphone stopped."); return; }
+    if (mic) return micStop();
     if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
       show("getUserMedia not available.");
       return;
     }
-    navigator.mediaDevices.getUserMedia({ audio: true }).then(function (stream) {
-      audioCtx = audioCtx || new (window.AudioContext || window.webkitAudioContext)();
-      var src = audioCtx.createMediaStreamSource(stream);
-      var analyser = audioCtx.createAnalyser();
-      analyser.fftSize = 2048;
-      src.connect(analyser);
-      micState = { analyser: analyser, stream: stream, buffer: [], collecting: false };
-      show("Listening… (decoding is best-effort on live audio)");
-      var timer = setInterval(function () {
-        if (!micState) { clearInterval(timer); return; }
-        var data = new Float32Array(analyser.fftSize);
-        analyser.getFloatTimeDomainData(data);
-        // append samples; demod in 8-sample bit windows when a stable block exists
-        var s16 = new Int16Array(data.length);
-        for (var i = 0; i < data.length; i++) s16[i] = Math.max(-1, Math.min(1, data[i])) * 32767;
-        micState.buffer.push(s16);
-        if (micState.buffer.length >= 64 && !micState.collecting) {
-          micState.collecting = true;
-          setTimeout(function () {
-            var flat = new Int16Array(micState.buffer.length * 2048);
-            var k = 0;
-            for (var j = 0; j < micState.buffer.length; j++) { flat.set(micState.buffer[j], k); k += micState.buffer[j].length; }
-            var bits = [];
-            var S = 8;
-            for (var b = 0; b + S <= flat.length; b += S) {
-              var m = 0, s = 0;
-              for (var t = b; t < b + S; t++) {
-                m += flat[t] * Math.sin(2 * Math.PI * 1200 * t / 19200);
-                s += flat[t] * Math.sin(2 * Math.PI * 2400 * t / 19200);
-              }
-              bits.push(Math.abs(m) > Math.abs(s) ? 1 : 0);
-            }
-            var bytes = [];
-            for (var bb = 0; bb + 8 <= bits.length; bb += 8) {
-              var v = 0;
-              for (var kk = 0; kk < 8; kk++) v = (v << 1) | bits[bb + kk];
-              bytes.push(v);
-            }
-            // frame parse (shared logic; a future refactor can reuse CairnDecoder internals)
-            try {
-              var u8 = Uint8Array.from(bytes);
-              var payload = CairnDecoder.decodeWavBytes(
-                // wrap: build a minimal wav header around the captured samples
-                (function () {
-                  var header = new Uint8Array(44);
-                  var dv = new DataView(header.buffer);
-                  header.set([0x52,0x49,0x46,0x46], 0);
-                  dv.setUint32(4, 36 + flat.length * 2, true);
-                  header.set([0x57,0x41,0x56,0x45,0x66,0x6d,0x74,0x20], 8);
-                  dv.setUint32(16, 16, true);
-                  dv.setUint16(20, 1, true); dv.setUint16(22, 1, true);
-                  dv.setUint32(24, 19200, true); dv.setUint32(28, 38400, true);
-                  dv.setUint16(32, 2, true); dv.setUint16(34, 16, true);
-                  header.set([0x64,0x61,0x74,0x61], 36);
-                  dv.setUint32(40, flat.length * 2, true);
-                  var all = new Uint8Array(44 + flat.length * 2);
-                  all.set(header);
-                  all.set(new Uint8Array(flat.buffer), 44);
-                  return all;
-                })()
-              );
-              out.textContent = new TextDecoder().decode(payload);
-              show("Microphone decode succeeded: " + payload.length + " bytes.");
-            } catch (e) {
-              show("Mic decode in progress… (" + e.message + ")");
-            }
-            micState.collecting = false;
-          }, 1500);
-        }
-      }, 200);
-    }).catch(function () { show("Microphone permission denied."); });
+    return navigator.mediaDevices.getUserMedia({ audio: true }).then(micStart).catch(function () {
+      mic = null;
+      document.getElementById("mic").textContent = "Start microphone decode";
+      show("Microphone permission denied.");
+    });
   });
 })();
 </script>

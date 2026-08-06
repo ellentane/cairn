@@ -151,6 +151,21 @@ let genOk = true;
 try { new Function(genMatch[1]); } catch (e) { genOk = false; }
 check("generated decode.html JS parses (syntax)", !!genMatch && genOk);
 
+// 6a. mic path: the v1-era artefacts (analyser polling, 64-chunk window, fake
+// wav header, hardcoded 19200) are gone; the v2 capture is present
+const appTpl = scriptMatch[1].slice(decoderSrc.length);
+check("tpl mic: v1 analyser polling removed",
+  !appTpl.includes("analyser") && !appTpl.includes("fftSize") && !appTpl.includes("getFloatTimeDomainData"));
+check("tpl mic: v1 fake wav header + hardcoded rate removed",
+  !appTpl.includes("0x52,0x49,0x46,0x46") && !appTpl.includes("19200") && !appTpl.includes("micState"));
+check("tpl mic: v2 AudioWorklet capture present",
+  appTpl.includes("AudioWorkletProcessor") && appTpl.includes("cairn-capture") && appTpl.includes("micChunkLen"));
+check("tpl mic: ScriptProcessor fallback present", appTpl.includes("createScriptProcessor"));
+check("tpl mic: shared showDecoded helper present", appTpl.includes("function showDecoded"));
+const genApp = genMatch[1].slice(decoderSrc.length);
+check("generated decode.html mic: v1 artefacts absent from the build",
+  !genApp.includes("analyser") && !genApp.includes("fftSize") && !genApp.includes("micState") && !genApp.includes("19200"));
+
 // small page for a fast probe: the wire is always a full interleave group
 // (4080 bytes ≈ 24 s of radio audio), so a small page decodes quickly
 const probeMd = "/tmp/opencode/cairn-probe.md";
@@ -165,7 +180,16 @@ const probeWav = fs.readFileSync("/tmp/opencode/cairn-probe.wav");
   for (let i = 0; i < s16wav.length; i++) f32wav[i] = s16wav[i] / 32767;
   const audioBuffer = { getChannelData: () => f32wav, sampleRate: 19200 };
   let lastSrc = null;
+  let lastWorkletNode = null;
+  let lastSP = null;
+  function FakeAudioWorkletNode() {
+    const node = { port: { onmessage: null }, connect: () => {}, disconnect: () => {} };
+    lastWorkletNode = node;
+    return node;
+  }
   function FakeAudioContext() {}
+  FakeAudioContext.prototype.sampleRate = 19200;
+  FakeAudioContext.prototype.audioWorklet = { addModule: async () => {} };
   FakeAudioContext.prototype.decodeAudioData = function (ab, ok, err) {
     if (ok) queueMicrotask(() => ok(audioBuffer));
     return Promise.resolve(audioBuffer);
@@ -175,9 +199,10 @@ const probeWav = fs.readFileSync("/tmp/opencode/cairn-probe.wav");
     return lastSrc;
   };
   FakeAudioContext.prototype.destination = {};
-  FakeAudioContext.prototype.createMediaStreamSource = function () { return {}; };
-  FakeAudioContext.prototype.createAnalyser = function () {
-    return { fftSize: 0, getFloatTimeDomainData: () => {} };
+  FakeAudioContext.prototype.createMediaStreamSource = function () { return { connect: () => {} }; };
+  FakeAudioContext.prototype.createScriptProcessor = function () {
+    lastSP = { connect: () => {}, disconnect: () => {}, onaudioprocess: null };
+    return lastSP;
   };
 
   const els = {};
@@ -192,7 +217,10 @@ const probeWav = fs.readFileSync("/tmp/opencode/cairn-probe.wav");
   const api = require("../src/decoder.js");
   const appCode = scriptMatch[1].slice(decoderSrc.length);
   const runTpl = new Function("document", "window", "navigator", "URL", "CairnDecoder", appCode);
-  runTpl(document, { AudioContext: FakeAudioContext }, {}, { createObjectURL: () => "blob:probe" }, api);
+  const fakeStream = { getTracks: () => [{ stop() {} }] };
+  const micNav = { mediaDevices: { getUserMedia: async () => fakeStream } };
+  const micWindow = { AudioContext: FakeAudioContext, AudioWorkletNode: FakeAudioWorkletNode };
+  runTpl(document, micWindow, micNav, { createObjectURL: () => "blob:probe" }, api);
   const fileOf = (bytes) => ({ arrayBuffer: async () => { const ab = new ArrayBuffer(bytes.length); new Uint8Array(ab).set(bytes); return ab; } });
 
   await handlers["file:change"].call({ files: [fileOf(probeWav)] });
@@ -220,6 +248,41 @@ const probeWav = fs.readFileSync("/tmp/opencode/cairn-probe.wav");
   handlers["transmit:click"]();
   await new Promise((r) => setTimeout(r, 5));
   check("transmit honors loop off", !!lastSrc && lastSrc.loop === false);
+
+  // 6c. mic path probe (AudioWorklet): start recording, feed the accumulated
+  // chunks from the probe wav (4096-frame pieces; the fake context runs at
+  // 19200 so the wav needs no resampling), stop, and assert the decoded page
+  // with stats. The worklet node is faked — the tpl only needs its port —
+  // so the real accumulate/stop/decode path is exercised end to end.
+  const CHUNK = 4096;
+  els.out.textContent = "";
+  await handlers["mic:click"]();
+  check("mic start: worklet node wired",
+    !!lastWorkletNode && typeof lastWorkletNode.port.onmessage === "function");
+  check("mic start: recording status",
+    /^Listening… \(recording \d+(\.\d+)?s\) — stop when the transmission ends$/.test(els.status.textContent));
+  for (let off = 0; off < f32wav.length; off += CHUNK) {
+    lastWorkletNode.port.onmessage({ data: f32wav.subarray(off, Math.min(off + CHUNK, f32wav.length)) });
+  }
+  await handlers["mic:click"]();
+  check("mic stop: worklet capture decodes to the page", els.out.textContent === probePage.toString("utf8"));
+  check("mic stop: stats readout",
+    /^Decoded \d+ bytes, CRC verified, sync SNR \d+(\.\d+)? dB, 0 codewords corrected\.$/.test(els.status.textContent));
+
+  // 6d. ScriptProcessor fallback probe: re-run the app with AudioWorkletNode
+  // absent, drive onaudioprocess directly, and decode the same wav
+  runTpl(document, { AudioContext: FakeAudioContext }, micNav, { createObjectURL: () => "blob:probe" }, api);
+  els.out.textContent = "";
+  await handlers["mic:click"]();
+  check("mic fallback: scriptprocessor node wired",
+    !!lastSP && typeof lastSP.onaudioprocess === "function");
+  for (let off = 0; off < f32wav.length; off += CHUNK) {
+    lastSP.onaudioprocess({ inputBuffer: { getChannelData: () => f32wav.subarray(off, Math.min(off + CHUNK, f32wav.length)) } });
+  }
+  await handlers["mic:click"]();
+  check("mic fallback: scriptprocessor capture decodes to the page", els.out.textContent === probePage.toString("utf8"));
+  check("mic fallback: status readout",
+    /^Decoded \d+ bytes, CRC verified, sync SNR \d+(\.\d+)? dB, 0 codewords corrected\.$/.test(els.status.textContent));
 
   console.log(failures ? `\n${failures} FAILURE(S)` : "\nAUDIO TESTS GREEN");
   process.exitCode = failures ? 1 : 0;
