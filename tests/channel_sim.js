@@ -72,14 +72,13 @@
 //   and drops the arriving tone's level for 1-2 symbols; the sync search
 //   then misses ~3% of trials. This is the model's honest floor; the gate's
 //   5% budget absorbs it.
-// - clean vs radio: clean DECODES BETTER than radio everywhere (0/60 vs
-//   2/60 at 25 dB) — the 3% 1:2-ratio harmonic spur is far below the
-//   correlator decision margin, and the clean profile's flat phase curve
-//   never triggers the tracker. The expected clean-is-worse inversion does
-//   not materialize; the numbers inform Task 6b's sweep.
+// - clean vs radio post-lock (1200/2300 @ 14 spb): radio 0% FER at the spec
+//   channel; clean (1200/2400 @ 8 spb, unchanged) measures ~27% FER through
+//   the same echo+clock stages — the profile is the fast file path, not a
+//   radio link, so it is report-only and not gated.
 //
-// Gate (default run, wired into tests/e2e.sh): 200 trials, radio profile,
-// 1 KB seeded payload, SNR 25 dB, seed 0x5EED; PASS iff failures <= 10 (5%).
+// Gate (default run, wired into tests/e2e.sh): 100 trials, radio profile,
+// 1 KB seeded payload, SNR 25 dB, seed 0x5EED; PASS iff failures <= 5 (5%).
 // The clean profile runs on the same trials and is reported (not gated).
 //
 // CLI: node tests/channel_sim.js [--trials N] [--snr dB] [--seed S]
