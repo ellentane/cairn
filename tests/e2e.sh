@@ -48,6 +48,9 @@ node tests/link_profiles_test.js
 echo "== channel sim =="
 node tests/channel_sim.js
 
+echo "== channel sim relay =="
+node tests/channel_sim.js --relay
+
 echo "== last box (Node smoke) =="
 node tests/showcase_smoke.js index.html
 

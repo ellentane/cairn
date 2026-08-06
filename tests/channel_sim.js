@@ -86,7 +86,7 @@
 // --report prints per-trial failure reasons + aggregates and exits 0.
 const { execFileSync } = require("child_process");
 const path = require("path");
-const { decodeFrame, gunzipSync } = require("../src/decoder.js");
+const { decodeFrame, decodeFrameSamples, gunzipSync } = require("../src/decoder.js");
 
 const SR = 19200;
 const TONE_AMP = 12000 / 32768; // encoder tone amplitude (src/audio.zig)
@@ -175,6 +175,15 @@ function drawChannelParams(rng, opts) {
     echoD2Ms: 10 + rng() * 30,
     echo1: ECHO1 * echo,
     echo2: ECHO2 * echo,
+    // acoustic-hop reverb (relay mode): close-coupling gains, per-hop taps
+    hop1D1Ms: 12 + rng() * 25,
+    hop1D2Ms: 20 + rng() * 35,
+    hop1G1: 0.16 * echo,
+    hop1G2: 0.08 * echo,
+    hop2D1Ms: 10 + rng() * 22,
+    hop2D2Ms: 18 + rng() * 30,
+    hop2G1: 0.13 * echo,
+    hop2G2: 0.06 * echo,
     ppm: rng() * 2 * ppmMax - ppmMax, // recorder clock offset
     noiseStride: 1 + 2 * Math.floor(rng() * (GAUSS_N / 2 - 1)), // odd, co-prime
     noisePhase: Math.floor(rng() * GAUSS_N),
@@ -260,21 +269,77 @@ function squelchClicks(s, p) {
 // (Hamming <= 8) absorbs the echo's sync corruption, but the echo's data-
 // region interference exceeds the RS(255,223) capacity for the radio profile
 // at 25 dB (see "measured constraints" above). Gains remain parameters.
-function reverb(s, p) {
-  const e1 = p.echo1 !== undefined ? p.echo1 : ECHO1;
-  const e2 = p.echo2 !== undefined ? p.echo2 : ECHO2;
-  if (e1 <= 0 && e2 <= 0) return s;
+function reverbAt(s, d1ms, d2ms, g1, g2) {
+  if (g1 <= 0 && g2 <= 0) return s;
   const n = s.length;
-  const d1 = Math.round(p.echoD1Ms * SR / 1000);
-  const d2 = Math.round(p.echoD2Ms * SR / 1000);
+  const d1 = Math.round(d1ms * SR / 1000);
+  const d2 = Math.round(d2ms * SR / 1000);
   const maxD = Math.max(d1, d2) + 1;
   const buf = new Float32Array(maxD);
   const out = new Float32Array(n);
   let idx = 0;
   for (let i = 0; i < n; i++) {
-    out[i] = s[i] + e1 * buf[(idx - d1 + maxD * 2) % maxD] + e2 * buf[(idx - d2 + maxD * 2) % maxD];
+    out[i] = s[i] + g1 * buf[(idx - d1 + maxD * 2) % maxD] + g2 * buf[(idx - d2 + maxD * 2) % maxD];
     buf[idx] = s[i];
     idx = (idx + 1) % maxD;
+  }
+  return out;
+}
+
+function reverb(s, p) {
+  return reverbAt(s, p.echoD1Ms, p.echoD2Ms, p.echo1, p.echo2);
+}
+
+// Acoustic hop (speaker/mic + room): light reverb, speaker/mic nonlinearity
+// (harmonics + soft clip), and ambient room noise. Used twice in relay mode
+// (playback hop and recorder hop).
+function acousticHop(s, rng, p, hop) {
+  const d1 = hop === 0 ? p.hop1D1Ms : p.hop2D1Ms;
+  const d2 = hop === 0 ? p.hop1D2Ms : p.hop2D2Ms;
+  const g1 = hop === 0 ? p.hop1G1 : p.hop2G1;
+  const g2 = hop === 0 ? p.hop1G2 : p.hop2G2;
+  let x = reverbAt(s, d1, d2, g1, g2);
+  const n = x.length;
+  const out = new Float32Array(n);
+  for (let i = 0; i < n; i++) {
+    const y = x[i] + H2 * 0.5 * x[i] * x[i] + H3 * 0.5 * x[i] * x[i] * x[i]; // lighter hop nonlinearity
+    out[i] = CLIP * Math.tanh(y / CLIP);
+  }
+  return awgn(out, { snr: 30, noiseStride: p.noiseStride, noisePhase: (p.noisePhase + hop * 7) % GAUSS_N });
+}
+
+// ---------- relay chain: speaker -> radio-1 mic -> radio-1 -> radio-2 ->
+// radio-2 speaker -> recorder mic -> recorder (three legs, like the real use) --
+// Leg 1 (playback hop): room + speaker/mic nonlinearity + ambient noise.
+// Leg 2 (radio): bandpass/tilt/harmonics/clip/AGC + squelch + FM clicks + RF noise.
+// Leg 3 (recorder hop): room + nonlinearity + ambient noise + clock offset,
+// then resampled to the recorder's native 44100 Hz (the mic path's decode
+// entry is decodeFrameSamples at the context rate).
+function relayChain(wav, rng, opts) {
+  opts = opts || {};
+  const p = opts.params || drawChannelParams(rng || mulberry32(1), opts);
+  if (opts.snr !== undefined) p.snr = opts.snr;
+  let x = samplesOf(wav);
+  x = acousticHop(x, rng, p, 0);          // leg 1
+  x = shapeTiltBandpassClipAgc(x);        // leg 2 audio path
+  squelchClicks(x, p);                    // leg 2 squelch + FM clicks
+  x = awgn(x, p);                         // leg 2 RF noise at p.snr
+  x = acousticHop(x, rng, p, 1);          // leg 3
+  x = clockOffset(x, p);                  // recorder clock
+  x = resampleTo(x, 44100 / SR);          // recorder's native rate
+  return { samples: x, sr: 44100 };
+}
+
+function resampleTo(samples, factor) {
+  const n = samples.length;
+  const out = new Float32Array(Math.floor(n * factor));
+  for (let i = 0; i < out.length; i++) {
+    const pos = i / factor;
+    const i0 = Math.floor(pos);
+    const f = pos - i0;
+    const j0 = Math.min(i0, n - 1);
+    const j1 = Math.min(i0 + 1, n - 1);
+    out[i] = samples[j0] + (samples[j1] - samples[j0]) * f;
   }
   return out;
 }
@@ -392,9 +457,54 @@ function randBytes(rng, len) {
   return b;
 }
 
+// Relay gate: the full three-leg chain (playback hop -> radio -> recorder hop
+// -> 44.1 kHz recorder), decoded through decodeFrameSamples — the exact entry
+// the decode.html mic path uses. Gate: 100 trials, radio profile, radio-leg
+// SNR 25 dB, budget 5 failures.
+function runRelay(opts) {
+  const wavprobe = path.join(__dirname, "..", "zig-out", "bin", "wavprobe");
+  let fail = 0, sync = 0, rs = 0, ok = 0, snrSum = 0;
+  for (let t = 0; t < opts.trials; t++) {
+    const rng = mulberry32((opts.seed + Math.imul(t + 1, 0x9E3779B9)) >>> 0);
+    const payload = randBytes(rng, 1024);
+    const params = drawChannelParams(rng, opts);
+    const wav = encodeV2(wavprobe, payload, "radio");
+    const ch = relayChain(wav, rng, { params, snr: opts.snr });
+    const i16 = new Int16Array(ch.samples.length);
+    for (let i = 0; i < ch.samples.length; i++) {
+      const v = Math.max(-1, Math.min(1, ch.samples[i]));
+      i16[i] = Math.round(v * 32767);
+    }
+    let res;
+    try {
+      const got = decodeFrameSamples(i16, ch.sr);
+      const back = gunzipSync(got.compressed);
+      if (!bytesEqual(back, payload)) res = { ok: false, err: "PayloadMismatch" };
+      else { res = { ok: true, stats: got.stats }; }
+    } catch (e) {
+      res = { ok: false, err: e.name || "Error" };
+    }
+    if (res.ok) { ok++; snrSum += res.stats.syncSnr; }
+    else {
+      fail++;
+      if (res.err === "SyncNotFound") sync++;
+      else rs++;
+    }
+  }
+  const fer = 100 * fail / opts.trials;
+  const meanSnr = ok ? (snrSum / ok).toFixed(1) : "-";
+  console.log(`relay: ok=${ok}/${opts.trials} FER=${fer.toFixed(2)}% (${fail}) sync=${sync} rs=${rs} meanSyncSnr=${meanSnr}dB @ radio-leg ${opts.snr}dB seed 0x${opts.seed.toString(16)}`);
+  if (opts.report) return 0;
+  const pass = fail <= 5;
+  console.log(pass
+    ? `PASS relay gate (FER ${fer.toFixed(2)}% <= 5%)`
+    : `FAIL relay gate (${fail}/${opts.trials} failures > 5)`);
+  return pass ? 0 : 1;
+}
+
 // ---------- CLI ----------
 function usage() {
-  console.log("usage: node tests/channel_sim.js [--trials N] [--snr dB] [--seed S] [--profile radio|clean] [--report] [--echo F] [--ppm P] [--sweep tl/th/spb,...]");
+  console.log("usage: node tests/channel_sim.js [--trials N] [--snr dB] [--seed S] [--profile radio|clean] [--report] [--echo F] [--ppm P] [--sweep tl/th/spb,...] [--relay]");
 }
 
 function parseArgs(argv) {
@@ -409,6 +519,7 @@ function parseArgs(argv) {
     else if (v === "--echo") a.echo = parseFloat(argv[++i]);
     else if (v === "--ppm") a.ppm = parseFloat(argv[++i]);
     else if (v === "--sweep") a.sweep = argv[++i];
+    else if (v === "--relay") a.relay = true;
     else if (v === "--help") { usage(); process.exit(0); }
     else { console.error("unknown arg: " + v); usage(); process.exit(2); }
   }
@@ -425,6 +536,7 @@ function main() {
   console.log("== channel sim ==");
   execFileSync("zig", ["build", "wavprobe"], { stdio: "pipe" });
   if (opts.sweep) return runSweep(opts) | 0;
+  if (opts.relay) return runRelay(opts) | 0;
 
   const profiles = ["radio", "clean"];
   const agg = {};
