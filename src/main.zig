@@ -20,6 +20,7 @@ const Options = struct {
     vm: emitter.Vm = .js,
     strict_format: bool = false,
     audio: ?[]const u8 = null,
+    audio_profile: usize = 1,
 };
 
 fn fatal(comptime fmt: []const u8, args: anytype) noreturn {
@@ -28,7 +29,7 @@ fn fatal(comptime fmt: []const u8, args: anytype) noreturn {
 }
 
 fn usage() noreturn {
-    std.debug.print("usage: cairn build <input.md|dir> [--output <file>] [--audio <out.wav>] [--budget <kb>] [--debug-encoding] [--vm js|wasm] [--strict-format] | cairn verify <file> | cairn demo [dir] | cairn fixtures <dir>\n", .{});
+    std.debug.print("usage: cairn build <input.md|dir> [--output <file>] [--audio <out.wav>] [--audio-profile clean|radio] [--budget <kb>] [--debug-encoding] [--vm js|wasm] [--strict-format] | cairn verify <file> | cairn demo [dir] | cairn fixtures <dir>\n", .{});
     std.process.exit(2);
 }
 
@@ -74,6 +75,15 @@ fn parseFlags(_: std.mem.Allocator, args: []const [:0]const u8, start: usize) !O
             i += 1;
         } else if (std.mem.eql(u8, args[i], "--audio") and i + 1 < args.len) {
             opts.audio = args[i + 1];
+            i += 1;
+        } else if (std.mem.eql(u8, args[i], "--audio-profile") and i + 1 < args.len) {
+            if (std.mem.eql(u8, args[i + 1], "clean")) {
+                opts.audio_profile = 0;
+            } else if (std.mem.eql(u8, args[i + 1], "radio")) {
+                opts.audio_profile = 1;
+            } else {
+                fatal("invalid --audio-profile value: {s} (expected clean|radio)", .{args[i + 1]});
+            }
             i += 1;
         } else if (std.mem.eql(u8, args[i], "--strict-format")) {
             opts.strict_format = true;
@@ -273,28 +283,28 @@ fn buildSource(arena: std.mem.Allocator, io: std.Io, source: []const u8, base_di
         }
         const page_bytes = std.Io.Dir.cwd().readFileAlloc(io, opts.output, arena, .limited(1 << 24)) catch |e|
             fatal("cannot read back {s}: {s}", .{ opts.output, @errorName(e) });
-        const wav = audio.encode(arena, page_bytes) catch |e| switch (e) {
-            error.TooLarge => fatal("page too large for audio: cannot encode {s}", .{audio_path}),
+        const wav = audio.encodeProfile(arena, page_bytes, opts.audio_profile) catch |e| switch (e) {
             error.OutOfMemory => return e,
+            error.BadProfile => fatal("internal error: bad audio profile index {d}", .{opts.audio_profile}),
+            else => fatal("audio encode failed: {s}", .{@errorName(e)}),
         };
         std.Io.Dir.cwd().writeFile(io, .{ .sub_path = audio_path, .data = wav }) catch |e| {
             fatal("cannot write {s}: {s}", .{ audio_path, @errorName(e) });
         };
-        std.debug.print("cairn: wrote {s} ({d} samples, {d} bytes)\n", .{ audio_path, (wav.len - 44) / 2, wav.len });
+        const comp = audio.gzip(arena, page_bytes) catch |e| switch (e) {
+            error.OutOfMemory => return e,
+            else => fatal("audio encode failed: {s}", .{@errorName(e)}),
+        };
+        const wav_samples: usize = (wav.len - 44) / 2;
+        const duration: f64 = @as(f64, @floatFromInt(wav_samples)) / @as(f64, @floatFromInt(audio.SAMPLE_RATE));
+        const baud: u32 = audio.SAMPLE_RATE / audio.LINK_PROFILES[opts.audio_profile].samples_per_bit;
+        std.debug.print("cairn: wrote {s} ({d} samples, {d} bytes, {d} KB page -> {d} KB gzip, {d:.1}s at {d} bps)\n", .{ audio_path, wav_samples, wav.len, page_bytes.len / 1024, comp.len / 1024, duration, baud });
         const decode_dir = std.fs.path.dirname(audio_path) orelse ".";
         const decode_path = try std.fmt.allocPrint(arena, "{s}/decode.html", .{decode_dir});
-        const existing = std.Io.Dir.cwd().openFile(io, decode_path, .{}) catch |e| switch (e) {
-            error.FileNotFound => null,
-            else => return e,
+        std.Io.Dir.cwd().writeFile(io, .{ .sub_path = decode_path, .data = try buildDecodeHtml(arena) }) catch |e| {
+            fatal("cannot write {s}: {s}", .{ decode_path, @errorName(e) });
         };
-        if (existing) |f| {
-            f.close(io);
-        } else {
-            std.Io.Dir.cwd().writeFile(io, .{ .sub_path = decode_path, .data = try buildDecodeHtml(arena) }) catch |e| {
-                fatal("cannot write {s}: {s}", .{ decode_path, @errorName(e) });
-            };
-            std.debug.print("cairn: wrote {s}\n", .{decode_path});
-        }
+        std.debug.print("cairn: wrote {s}\n", .{decode_path});
     }
 }
 

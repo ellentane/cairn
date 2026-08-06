@@ -2,8 +2,8 @@
 // Audio round-trip: zig encode -> node decode -> byte equality + CRC vector.
 const fs = require("fs");
 const path = require("path");
-const { execFileSync } = require("child_process");
-const { decodeWavBytes, crc32, demodIQ, gunzipSync } = require("../src/decoder.js");
+const { execFileSync, spawnSync } = require("child_process");
+const { decodeFrame, crc32, demodIQ, gunzipSync } = require("../src/decoder.js");
 
 let failures = 0;
 function check(name, cond) {
@@ -11,25 +11,52 @@ function check(name, cond) {
   else { failures++; console.error("FAIL " + name); }
 }
 
-// 0. clean slate: decode.html generation is only-if-absent, so a stale file
-// from an earlier run would make the existence check pass vacuously
-for (const p of ["/tmp/cairn-audio-page.html", "/tmp/cairn-audio-site.wav", "/tmp/cairn-audio-decode.html", "/tmp/decode.html"]) {
+// 0. clean slate: --audio always regenerates decode.html, and the stale
+// replacement test below plants its own garbage first — remove leftovers
+for (const p of ["/tmp/cairn-audio-page.html", "/tmp/cairn-audio-site.wav", "/tmp/cairn-audio-clean.wav", "/tmp/cairn-audio-decode.html", "/tmp/decode.html"]) {
   fs.rmSync(p, { force: true });
 }
 
 // 1. CRC vector
 check("crc32 iso-hdlc vector", crc32(new TextEncoder().encode("123456789")) === 0xCBF43926);
 
-// 2. build example -> --audio -> decode -> byte equality
+// 2. build example -> --audio (v2 frame, default radio profile) -> decode
+// via decodeFrame + gunzipSync -> byte equality
 const root = path.join(__dirname, "..");
 execFileSync(path.join(root, "zig-out/bin/cairn"), ["build", "example/index.md", "--output", "/tmp/cairn-audio-page.html"], { stdio: "pipe" });
 const page = fs.readFileSync("/tmp/cairn-audio-page.html");
 const wavPath = "/tmp/cairn-audio-site.wav";
 execFileSync(path.join(root, "zig-out/bin/cairn"), ["build", "example/index.md", "--output", "/tmp/cairn-audio-page.html", "--audio", wavPath], { stdio: "pipe" });
 const wav = fs.readFileSync(wavPath);
-const decoded = decodeWavBytes(wav);
+const got = decodeFrame(wav);
+check("audio round-trip decodes with the v2 decoder", got.profile === "radio");
+const decoded = gunzipSync(got.compressed);
 check("audio round-trip byte equality", Buffer.compare(Buffer.from(decoded), page) === 0);
-check("decode.html generated", fs.existsSync(path.join(path.dirname(wavPath), "decode.html")));
+const decodePath = path.join(path.dirname(wavPath), "decode.html");
+const decodeHtml = fs.readFileSync(decodePath, "utf8");
+check("decode.html generated", fs.existsSync(decodePath));
+check("decode.html splices the v2 decoder", decodeHtml.includes("function decodeFrame") && decodeHtml.includes("tone_low: 1200") && decodeHtml.includes("tone_high: 2300"));
+check("decode.html has no leftover placeholder", !decodeHtml.includes("/*__CAIRN_DECODER__*/"));
+
+// 2b. --audio always regenerates decode.html: a pre-planted stale file is
+// replaced by the build
+const garbage = "<html><body>STALE</body></html>";
+fs.writeFileSync(decodePath, garbage);
+execFileSync(path.join(root, "zig-out/bin/cairn"), ["build", "example/index.md", "--output", "/tmp/cairn-audio-page.html", "--audio", wavPath], { stdio: "pipe" });
+const fresh = fs.readFileSync(decodePath, "utf8");
+check("stale decode.html replaced", !fresh.includes("STALE") && fresh.includes("function decodeFrame"));
+
+// 2c. --audio-profile clean selects the clean link profile
+const cleanWavPath = "/tmp/cairn-audio-clean.wav";
+execFileSync(path.join(root, "zig-out/bin/cairn"), ["build", "example/index.md", "--output", "/tmp/cairn-audio-page.html", "--audio", cleanWavPath, "--audio-profile", "clean"], { stdio: "pipe" });
+const cleanGot = decodeFrame(fs.readFileSync(cleanWavPath));
+check("clean profile wav decodes as clean", cleanGot.profile === "clean");
+check("clean profile round-trip", Buffer.compare(Buffer.from(gunzipSync(cleanGot.compressed)), page) === 0);
+
+// 2d. --audio-profile rejects unknown values cleanly
+const bad = spawnSync(path.join(root, "zig-out/bin/cairn"), ["build", "example/index.md", "--output", "/tmp/cairn-audio-page.html", "--audio-profile", "bogus"], { encoding: "utf8" });
+check("--audio-profile bogus fails", bad.status !== 0);
+check("--audio-profile bogus error message", /invalid --audio-profile/.test(bad.stderr || ""));
 
 // 3. v2 gzip payload path, cross-inflate checkpoint: the zig encoder is the
 // only gzip producer, node zlib the consumer. gzprobe (stdin -> gzip ->
