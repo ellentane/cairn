@@ -48,10 +48,7 @@ about leaving, running entirely as one file.
 - **WASM VM backend** — `--vm wasm` embeds the bytecode VM compiled to
   WebAssembly (Zig), feature-detected with an automatic JS-VM fallback;
   `--strict-format` pins the versioned bytecode header.
-- **Audio relay** — `--audio site.wav` encodes a built page into a WAV (FSK,
-  2400 bps, CRC-checked) playable out of any speaker; the generated
-  `decode.html` reconstructs the page from a file, a microphone, or transmits
-  it back.
+- **Audio relay** — `--audio site.wav` gzips and error-protects a built page into a WAV (FSK, ~1.4–2.4 kbps, CRC + Reed-Solomon) playable out of any speaker; the generated `decode.html` reconstructs the page from a file (wav/m4a/mp3/ogg), a microphone, or transmits it back. The default radio profile (1200/2300 Hz) is sweep-tuned to survive walkie-talkie chains; `--audio-profile clean` is the fast file path.
 - **Size budgets and tiers** — `--budget NKB` fails the build; every page gets
   a tier badge (Tombstone < 4 KB, Monolith < 16 KB, Obelisk < 64 KB, Megalith
   beyond) and a half-life score.
@@ -67,7 +64,7 @@ about leaving, running entirely as one file.
 ## Commands
 
 ```
-cairn build <file.md | dir> [--output <path>] [--budget <NKB>] [--debug-encoding] [--vm js|wasm] [--strict-format] [--audio <out.wav>]
+cairn build <file.md | dir> [--output <path>] [--budget <NKB>] [--debug-encoding] [--vm js|wasm] [--strict-format] [--audio <out.wav>] [--audio-profile clean|radio]
 cairn verify <index.html>       # hermeticity audit
 cairn demo [dir]                # generate + build a sample site
 cairn fixtures <dir>            # regenerate the fixture corpus
