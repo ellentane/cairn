@@ -164,14 +164,19 @@ function rebuildWav(s) {
 // Drawn once per trial and shared by both profile runs so the two wavs pass
 // through the SAME channel realization (positions are fractions of each wav's
 // own data region). channelModel() falls back to drawing any missing param.
-function drawChannelParams(rng) {
+function drawChannelParams(rng, opts) {
+  opts = opts || {};
+  const ppmMax = opts.ppm !== undefined ? opts.ppm : PPM_MAX;
+  const echo = opts.echo !== undefined ? opts.echo : 1; // scale factor on the spec gains
   const p = {
     openDelayMs: 50 + rng() * 250,   // squelch open delay
     burstLenMs: 20 + rng() * 60,     // squelch-close noise burst length
     burstFrac: rng(),                // burst position in the data region
-    echoD1Ms: 10 + rng() * 30,       // reverb tap delays (gains disabled)
+    echoD1Ms: 10 + rng() * 30,
     echoD2Ms: 10 + rng() * 30,
-    ppm: rng() * 2 * PPM_MAX - PPM_MAX, // recorder clock offset
+    echo1: ECHO1 * echo,
+    echo2: ECHO2 * echo,
+    ppm: rng() * 2 * ppmMax - ppmMax, // recorder clock offset
     noiseStride: 1 + 2 * Math.floor(rng() * (GAUSS_N / 2 - 1)), // odd, co-prime
     noisePhase: Math.floor(rng() * GAUSS_N),
   };
@@ -257,7 +262,9 @@ function squelchClicks(s, p) {
 // region interference exceeds the RS(255,223) capacity for the radio profile
 // at 25 dB (see "measured constraints" above). Gains remain parameters.
 function reverb(s, p) {
-  if (ECHO1 <= 0 && ECHO2 <= 0) return s;
+  const e1 = p.echo1 !== undefined ? p.echo1 : ECHO1;
+  const e2 = p.echo2 !== undefined ? p.echo2 : ECHO2;
+  if (e1 <= 0 && e2 <= 0) return s;
   const n = s.length;
   const d1 = Math.round(p.echoD1Ms * SR / 1000);
   const d2 = Math.round(p.echoD2Ms * SR / 1000);
@@ -266,7 +273,7 @@ function reverb(s, p) {
   const out = new Float32Array(n);
   let idx = 0;
   for (let i = 0; i < n; i++) {
-    out[i] = s[i] + ECHO1 * buf[(idx - d1 + maxD * 2) % maxD] + ECHO2 * buf[(idx - d2 + maxD * 2) % maxD];
+    out[i] = s[i] + e1 * buf[(idx - d1 + maxD * 2) % maxD] + e2 * buf[(idx - d2 + maxD * 2) % maxD];
     buf[idx] = s[i];
     idx = (idx + 1) % maxD;
   }
@@ -311,7 +318,7 @@ function awgn(s, p) {
 // ---------- channel model ----------
 function channelModel(wav, rng, opts) {
   opts = opts || {};
-  const p = opts.params || drawChannelParams(rng || mulberry32(1));
+  const p = opts.params || drawChannelParams(rng || mulberry32(1), opts);
   if (opts.snr !== undefined) p.snr = opts.snr;
   let x = samplesOf(wav);
   x = shapeTiltBandpassClipAgc(x); // 1-4
@@ -323,8 +330,9 @@ function channelModel(wav, rng, opts) {
 }
 
 // ---------- encode + decode ----------
-function encodeV2(wavprobe, payload, profileName) {
-  return execFileSync(wavprobe, [profileName], { input: payload, maxBuffer: 64 * 1024 * 1024 });
+function encodeV2(wavprobe, payload, profileName, custom) {
+  const args = custom ? [profileName, String(custom.tone_low), String(custom.tone_high), String(custom.samples_per_bit)] : [profileName];
+  return execFileSync(wavprobe, args, { input: payload, maxBuffer: 64 * 1024 * 1024 });
 }
 
 function bytesEqual(a, b) {
@@ -333,9 +341,9 @@ function bytesEqual(a, b) {
   return true;
 }
 
-function tryDecode(wav, payload) {
+function tryDecode(wav, payload, profilesOverride) {
   try {
-    const got = decodeFrame(wav);
+    const got = decodeFrame(wav, profilesOverride);
     const back = gunzipSync(got.compressed);
     if (!bytesEqual(back, payload)) {
       return { ok: false, err: "PayloadMismatch", profile: got.profile, stats: got.stats };
@@ -343,6 +351,39 @@ function tryDecode(wav, payload) {
     return { ok: true, err: null, profile: got.profile, stats: got.stats };
   } catch (e) {
     return { ok: false, err: e.name || "Error", profile: null, stats: null };
+  }
+}
+
+// sweep mode: encode with custom modulation constants (wavprobe's optional
+// args) and decode with matching overrides, per config "tone_low/tone_high/spb"
+function runSweep(opts) {
+  const wavprobe = path.join(__dirname, "..", "zig-out", "bin", "wavprobe");
+  const configs = opts.sweep.split(",").map((c) => {
+    const [tl, th, spb] = c.split("/").map((x) => Number(x));
+    return { tone_low: tl, tone_high: th, samples_per_bit: spb };
+  });
+  const rows = [];
+  for (const cfg of configs) {
+    let fail = 0, sync = 0, rs = 0;
+    for (let t = 0; t < opts.trials; t++) {
+      const rng = mulberry32((opts.seed + Math.imul(t + 1, 0x9E3779B9)) >>> 0);
+      const payload = randBytes(rng, 1024);
+      const params = drawChannelParams(rng);
+      const wav = encodeV2(wavprobe, payload, "radio", cfg);
+      const ch = channelModel(wav, rng, { params, snr: opts.snr });
+      const res = tryDecode(ch, payload, [Object.assign({ name: "radio" }, cfg)]);
+      if (!res.ok) {
+        fail++;
+        if (res.err === "SyncNotFound") sync++;
+        else rs++;
+      }
+    }
+    rows.push({ cfg, fail, fer: 100 * fail / opts.trials, sync, rs });
+  }
+  rows.sort((a, b) => a.fer - b.fer);
+  console.log(`sweep ${configs.length} configs x ${opts.trials} trials @ ${opts.snr}dB seed 0x${opts.seed.toString(16)} (echo ${opts.echo}, ppm ${opts.ppm})`);
+  for (const r of rows) {
+    console.log(`  ${String(r.cfg.tone_low).padStart(4)}/${String(r.cfg.tone_high).padStart(4)} spb ${String(r.cfg.samples_per_bit).padStart(2)}: FER ${r.fer.toFixed(1).padStart(5)}% (${r.fail}/${opts.trials}) sync=${r.sync} rs=${r.rs}`);
   }
 }
 
@@ -354,7 +395,7 @@ function randBytes(rng, len) {
 
 // ---------- CLI ----------
 function usage() {
-  console.log("usage: node tests/channel_sim.js [--trials N] [--snr dB] [--seed S] [--profile radio|clean] [--report]");
+  console.log("usage: node tests/channel_sim.js [--trials N] [--snr dB] [--seed S] [--profile radio|clean] [--report] [--echo F] [--ppm P] [--sweep tl/th/spb,...]");
 }
 
 function parseArgs(argv) {
@@ -366,6 +407,9 @@ function parseArgs(argv) {
     else if (v === "--snr") a.snr = parseFloat(argv[++i]);
     else if (v === "--seed") a.seed = Number(argv[++i]) >>> 0;
     else if (v === "--profile") a.gateProfile = argv[++i];
+    else if (v === "--echo") a.echo = parseFloat(argv[++i]);
+    else if (v === "--ppm") a.ppm = parseFloat(argv[++i]);
+    else if (v === "--sweep") a.sweep = argv[++i];
     else if (v === "--help") { usage(); process.exit(0); }
     else { console.error("unknown arg: " + v); usage(); process.exit(2); }
   }
@@ -381,6 +425,7 @@ function main() {
   const wavprobe = path.join(__dirname, "..", "zig-out", "bin", "wavprobe");
   console.log("== channel sim ==");
   execFileSync("zig", ["build", "wavprobe"], { stdio: "pipe" });
+  if (opts.sweep) return runSweep(opts) | 0;
 
   const profiles = ["radio", "clean"];
   const agg = {};
@@ -390,7 +435,7 @@ function main() {
   for (let t = 0; t < opts.trials; t++) {
     const rng = mulberry32((opts.seed + Math.imul(t + 1, 0x9E3779B9)) >>> 0);
     const payload = randBytes(rng, 1024);
-    const params = drawChannelParams(rng); // one channel realization per trial
+    const params = drawChannelParams(rng, opts); // one channel realization per trial
     for (const prof of profiles) {
       const wav = encodeV2(wavprobe, payload, prof);
       const ch = channelModel(wav, rng, { params, snr: opts.snr });

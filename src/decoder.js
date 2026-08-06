@@ -270,19 +270,24 @@
 
   // Interpolated single-tone complex correlation at an arbitrary (fractional)
   // window start. Returns {I, Q, mag} (mag normalized by the per-tone scalar).
-  // Linear sample interpolation keeps the complex correlation smooth at any
-  // phase — its PHASE advances at the tone frequency as the window slides,
-  // which is what the timing tracker measures.
+  // The reference oscillator advances by recursion (cos/sin recurrence) rather
+  // than per-sample trig — the hot path for the whole decoder.
   function winCorrC(samples, sr, f, t, spb, normalize, k) {
     let I = 0, Q = 0;
-    for (let s = 0; s < spb; s++) {
-      const p = t + s;
+    const w = 2 * Math.PI * f / sr;
+    let c = Math.cos(w * t), s = Math.sin(w * t);
+    const cD = Math.cos(w), sD = Math.sin(w);
+    for (let i = 0; i < spb; i++) {
+      const p = t + i;
       const i0 = Math.floor(p), fr = p - i0;
       const x0 = i0 >= 0 && i0 < samples.length ? samples[i0] : 0;
       const x1 = i0 + 1 < samples.length ? samples[i0 + 1] : 0;
       const xv = x0 + (x1 - x0) * fr;
-      I += xv * Math.cos(2 * Math.PI * f * p / sr);
-      Q += xv * Math.sin(2 * Math.PI * f * p / sr);
+      I += xv * c;
+      Q += xv * s;
+      const nc = c * cD - s * sD;
+      s = s * cD + c * sD;
+      c = nc;
     }
     const nk = normalize[k];
     return { I, Q, mag: Math.hypot(I, Q) / (nk > 0 ? nk : 1) };
@@ -384,10 +389,17 @@
   // stream for the sync word; for each sync candidate (in score order, max 8)
   // learn the tone scalars, demodulate with drift tracking, and decode the
   // region. Returns the recovered compressed payload and decode stats.
-  function decodeFrame(wavBytes) {
+  // Find the frame on its own: try each link profile, scanning the sample
+  // stream for the sync word; for each sync candidate (in score order, max 8)
+  // learn the tone scalars, demodulate with drift tracking, and decode the
+  // region. `profilesOverride` replaces the shipped LINK_PROFILES (used by the
+  // channel simulator's constant sweep — the swept entries must use the same
+  // profile-byte indices, i.e. an entry named "radio" decodes a radio frame).
+  function decodeFrame(wavBytes, profilesOverride) {
     const { sr, samples } = parseWav(wavBytes);
+    const profiles = profilesOverride || LINK_PROFILES;
     let lastErr = null;
-    for (const profile of LINK_PROFILES) {
+    for (const profile of profiles) {
       const spb = sr / (ENCODER_RATE / profile.samples_per_bit);
       const tones = [profile.tone_low, profile.tone_high];
       for (const cand of findSyncCandidates(samples, sr, spb, tones)) {

@@ -87,7 +87,15 @@ fn bitBytes(allocator: std.mem.Allocator, out: *std.ArrayList(i16), phase: *f64,
 // first; bit 1 -> profile.tone_low, bit 0 -> profile.tone_high.
 pub fn encodeProfile(allocator: std.mem.Allocator, payload: []const u8, profile_index: usize) ![]u8 {
     if (profile_index >= LINK_PROFILES.len) return error.BadProfile;
-    const profile = LINK_PROFILES[profile_index];
+    return encodeProfileCustom(allocator, payload, profile_index, LINK_PROFILES[profile_index]);
+}
+
+// Like encodeProfile but with custom modulation constants (used by the channel
+// simulator's constant sweep; the profile byte stays the standard index so the
+// decoder's profile detection is unchanged).
+pub fn encodeProfileCustom(allocator: std.mem.Allocator, payload: []const u8, profile_index: usize, custom: LinkProfile) ![]u8 {
+    if (profile_index >= LINK_PROFILES.len) return error.BadProfile;
+    const profile = custom;
 
     const compressed = try gzip(allocator, payload);
     defer allocator.free(compressed);
