@@ -3,7 +3,7 @@
 const fs = require("fs");
 const path = require("path");
 const { execFileSync, spawnSync } = require("child_process");
-const { decodeFrame, crc32, demodIQ, gunzipSync } = require("../src/decoder.js");
+const { decodeFrame, decodeFrameSamples, crc32, demodIQ, gunzipSync } = require("../src/decoder.js");
 
 let failures = 0;
 function check(name, cond) {
@@ -113,5 +113,114 @@ for (const phi of phases) {
   check(`IQ phase ${phi.toFixed(2)} decodes [1,0]`, bits.length === 2 && bits[0] === 1 && bits[1] === 0);
 }
 
-console.log(failures ? `\n${failures} FAILURE(S)` : "\nAUDIO TESTS GREEN");
-process.exitCode = failures ? 1 : 0;
+// 5. decodeFrameSamples: the samples-based entry (what decode.html's
+// decodeAudioData path feeds) must match decodeFrame byte-for-byte, and
+// tolerate any capture rate (spb is derived from sr)
+{
+  const samples = new Int16Array(wav.buffer, wav.byteOffset + 44, (wav.length - 44) / 2);
+  const gotS = decodeFrameSamples(samples, 19200);
+  check("decodeFrameSamples decodes the radio wav", gotS.profile === "radio");
+  check("decodeFrameSamples payload byte-exact", Buffer.compare(Buffer.from(gunzipSync(gotS.compressed)), page) === 0);
+  check("decodeFrameSamples stats shape", typeof gotS.stats.syncSnr === "number" && Array.isArray(gotS.stats.rsCorrections));
+  const half = new Int16Array(Math.floor(samples.length / 2));
+  for (let i = 0; i < half.length; i++) half[i] = samples[i * 2];
+  const gotHalf = decodeFrameSamples(half, 9600);
+  check("decodeFrameSamples decodes at a foreign rate (9600 Hz)",
+    gotHalf.profile === "radio" && Buffer.compare(Buffer.from(gunzipSync(gotHalf.compressed)), page) === 0);
+}
+
+// 6. decode.html tpl: replicate main.zig's splice, then parse the inline JS
+// and drive the file handler headlessly. Node 26 has DecompressionStream and
+// Blob/Response, so the real inflate path runs; only DOM/window are stubbed.
+// The app IIFE runs in the main realm with the real module decoder injected as
+// the CairnDecoder global (the embedded copy is exercised by the parse checks
+// and by the built decode.html; running it needs a vm sandbox, which runs the
+// decoder ~7x slower — measured 53 s for one decode of the example wav).
+const tpl = fs.readFileSync(path.join(root, "tools/decode.html.tpl"), "utf8");
+const decoderSrc = fs.readFileSync(path.join(root, "src/decoder.js"), "utf8");
+const spliced = tpl.replace("/*__CAIRN_DECODER__*/", decoderSrc);
+check("tpl splice leaves no placeholder", !spliced.includes("/*__CAIRN_DECODER__*/"));
+const scriptMatch = spliced.match(/<script>([\s\S]*)<\/script>/);
+check("tpl has one script block", !!scriptMatch && (spliced.match(/<script>/g) || []).length === 1);
+let parseOk = true;
+try { new Function(scriptMatch[1]); } catch (e) { parseOk = false; }
+check("tpl inline JS parses (syntax)", parseOk);
+const genHtml = fs.readFileSync(decodePath, "utf8");
+const genMatch = genHtml.match(/<script>([\s\S]*)<\/script>/);
+let genOk = true;
+try { new Function(genMatch[1]); } catch (e) { genOk = false; }
+check("generated decode.html JS parses (syntax)", !!genMatch && genOk);
+
+// small page for a fast probe: the wire is always a full interleave group
+// (4080 bytes ≈ 24 s of radio audio), so a small page decodes quickly
+const probeMd = "/tmp/opencode/cairn-probe.md";
+fs.writeFileSync(probeMd, "# Probe\n\ncairn probe page " + "y".repeat(700) + "\n");
+execFileSync(path.join(root, "zig-out/bin/cairn"), ["build", probeMd, "--output", "/tmp/opencode/cairn-probe.html", "--audio", "/tmp/opencode/cairn-probe.wav"], { stdio: "pipe" });
+const probePage = fs.readFileSync("/tmp/opencode/cairn-probe.html");
+const probeWav = fs.readFileSync("/tmp/opencode/cairn-probe.wav");
+
+(async function () {
+  const s16wav = new Int16Array(probeWav.buffer, probeWav.byteOffset + 44, (probeWav.length - 44) / 2);
+  const f32wav = new Float32Array(s16wav.length);
+  for (let i = 0; i < s16wav.length; i++) f32wav[i] = s16wav[i] / 32767;
+  const audioBuffer = { getChannelData: () => f32wav, sampleRate: 19200 };
+  let lastSrc = null;
+  function FakeAudioContext() {}
+  FakeAudioContext.prototype.decodeAudioData = function (ab, ok, err) {
+    if (ok) queueMicrotask(() => ok(audioBuffer));
+    return Promise.resolve(audioBuffer);
+  };
+  FakeAudioContext.prototype.createBufferSource = function () {
+    lastSrc = { buffer: null, loop: false, connect: () => {}, start: () => {} };
+    return lastSrc;
+  };
+  FakeAudioContext.prototype.destination = {};
+  FakeAudioContext.prototype.createMediaStreamSource = function () { return {}; };
+  FakeAudioContext.prototype.createAnalyser = function () {
+    return { fftSize: 0, getFloatTimeDomainData: () => {} };
+  };
+
+  const els = {};
+  const handlers = {};
+  for (const id of ["status", "out", "download", "file", "transmit", "mic", "loop"]) {
+    els[id] = {
+      textContent: "", hidden: true, href: "", download: "",
+      addEventListener: (ev, cb) => { handlers[id + ":" + ev] = cb; },
+    };
+  }
+  const document = { getElementById: (id) => els[id] };
+  const api = require("../src/decoder.js");
+  const appCode = scriptMatch[1].slice(decoderSrc.length);
+  const runTpl = new Function("document", "window", "navigator", "URL", "CairnDecoder", appCode);
+  runTpl(document, { AudioContext: FakeAudioContext }, {}, { createObjectURL: () => "blob:probe" }, api);
+  const fileOf = (bytes) => ({ arrayBuffer: async () => { const ab = new ArrayBuffer(bytes.length); new Uint8Array(ab).set(bytes); return ab; } });
+
+  await handlers["file:change"].call({ files: [fileOf(probeWav)] });
+  check("file path: RIFF wav decodes to the page", els.out.textContent === probePage.toString("utf8"));
+  check("file path: stats readout", /^Decoded \d+ bytes, CRC verified, sync SNR \d+(\.\d+)? dB, 0 codewords corrected\.$/.test(els.status.textContent));
+  check("file path: download link revealed", els.download.hidden === false && els.download.download === "decoded.html");
+
+  const m4aBytes = Buffer.from([0x00, 0x00, 0x00, 0x20, 0x66, 0x74, 0x79, 0x70, 0x4D, 0x34, 0x41, 0x20]);
+  await handlers["file:change"].call({ files: [fileOf(m4aBytes)] });
+  check("file path: decodeAudioData path (m4a) decodes", els.out.textContent === probePage.toString("utf8"));
+  check("file path: decodeAudioData stats readout", /^Decoded \d+ bytes, CRC verified, sync SNR \d+(\.\d+)? dB, 0 codewords corrected\.$/.test(els.status.textContent));
+
+  const silence = Buffer.concat([probeWav.subarray(0, 44), Buffer.alloc(19200 * 2)]);
+  await handlers["file:change"].call({ files: [fileOf(silence)] });
+  check("file path: SyncNotFound taxonomy", els.status.textContent === "no cairn frame found in the audio (check the recording)");
+
+  handlers["loop:click"].call(els.loop);
+  check("loop toggle on", els.loop.textContent === "loop: on");
+  await new Promise((r) => setTimeout(r, 5));
+  handlers["transmit:click"]();
+  await new Promise((r) => setTimeout(r, 5));
+  check("transmit honors loop flag", !!lastSrc && lastSrc.loop === true);
+  handlers["loop:click"].call(els.loop);
+  await new Promise((r) => setTimeout(r, 5));
+  handlers["transmit:click"]();
+  await new Promise((r) => setTimeout(r, 5));
+  check("transmit honors loop off", !!lastSrc && lastSrc.loop === false);
+
+  console.log(failures ? `\n${failures} FAILURE(S)` : "\nAUDIO TESTS GREEN");
+  process.exitCode = failures ? 1 : 0;
+})();

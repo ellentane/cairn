@@ -11,10 +11,11 @@ pre{background:#f4f4f4;padding:1em;overflow:auto;max-height:20em}
 </head>
 <body>
 <h1>Cairn Audio Decoder</h1>
-<p>Decode a cairn <code>.wav</code> (file or live microphone) back into the original page.</p>
-<label>WAV file: <input type="file" id="file" accept=".wav,audio/wav"></label>
+<p>Decode a cairn audio recording (wav, m4a, mp3, ogg — file or live microphone) back into the original page.</p>
+<label>Audio file: <input type="file" id="file" accept="audio/*"></label>
 <button id="mic">Start microphone decode</button>
-<button id="transmit">Transmit loaded WAV</button>
+<button id="transmit">Transmit loaded file</button>
+<button id="loop">loop: off</button>
 <p id="status"></p>
 <h2>Reconstructed page</h2>
 <pre id="out"></pre>
@@ -27,39 +28,109 @@ pre{background:#f4f4f4;padding:1em;overflow:auto;max-height:20em}
   var download = document.getElementById("download");
   var lastWav = null;
   var audioCtx = null;
+  var loopOn = false;
 
   function show(text) { status.textContent = text; }
 
-  // file path (exact)
+  function errorText(e) {
+    if (e instanceof CairnDecoder.errors.SyncNotFound) return "no cairn frame found in the audio (check the recording)";
+    if (e instanceof CairnDecoder.errors.RSCorrectionFailed) return "audio too damaged to repair (RS correction failed)";
+    if (e instanceof CairnDecoder.errors.CRCError) return "frame integrity check failed";
+    if (e instanceof CairnDecoder.errors.WavParseError || e instanceof CairnDecoder.errors.UnsupportedFormat) return "unsupported audio format";
+    if (e.name === "NotSupportedError" || e.name === "EncodingError") return "unsupported audio format";
+    return "decode failed: " + (e && e.message ? e.message : e);
+  }
+
+  // gunzipSync is node-only; the browser inflates via DecompressionStream
+  function inflateGzip(bytes) {
+    var ds = new DecompressionStream("gzip");
+    var stream = new Blob([bytes]).stream().pipeThrough(ds);
+    return new Response(stream).arrayBuffer().then(function (ab) { return new Uint8Array(ab); });
+  }
+
+  function int16FromFloat32(f32) {
+    var s16 = new Int16Array(f32.length);
+    for (var i = 0; i < f32.length; i++) {
+      var v = f32[i];
+      if (v > 1) v = 1; else if (v < -1) v = -1;
+      s16[i] = v * 32767;
+    }
+    return s16;
+  }
+
+  function decodeToPage(res) {
+    return inflateGzip(res.compressed).then(function (payload) {
+      out.textContent = new TextDecoder().decode(payload);
+      download.hidden = false;
+      download.href = URL.createObjectURL(new Blob([payload], { type: "text/html" }));
+      download.download = "decoded.html";
+      var statsText = "";
+      if (res.stats) {
+        var parts = [];
+        if (typeof res.stats.syncSnr === "number" && isFinite(res.stats.syncSnr)) {
+          parts.push("sync SNR " + res.stats.syncSnr.toFixed(1) + " dB");
+        }
+        if (Array.isArray(res.stats.rsCorrections)) {
+          var n = 0;
+          for (var i = 0; i < res.stats.rsCorrections.length; i++) if (res.stats.rsCorrections[i] > 0) n++;
+          parts.push(n + " codewords corrected");
+        }
+        if (parts.length) statsText = ", " + parts.join(", ");
+      }
+      show("Decoded " + payload.length + " bytes, CRC verified" + statsText + ".");
+    }).catch(function () {
+      show("decompression failed.");
+    });
+  }
+
+  // file path: RIFF wav goes straight to the wav parser; any other container
+  // (m4a/mp3/ogg/…) is handed to decodeAudioData, which transcodes to
+  // channel-0 Float32 at the file's own sample rate — one path for every
+  // recorder app, mono or stereo, 8k–192k
   document.getElementById("file").addEventListener("change", function () {
     var f = this.files[0];
     if (!f) return;
-    f.arrayBuffer().then(function (buf) {
+    return f.arrayBuffer().then(function (buf) {
       lastWav = buf;
       var bytes = new Uint8Array(buf);
       try {
-        var payload = CairnDecoder.decodeWavBytes(bytes);
-        var text = new TextDecoder().decode(payload);
-        out.textContent = text;
-        download.hidden = false;
-        download.href = URL.createObjectURL(new Blob([payload], { type: "text/html" }));
-        download.download = "decoded.html";
-        show("Decoded " + payload.length + " bytes, CRC verified.");
-      } catch (e) { show("Decode failed: " + e.message); }
+        if (bytes.length >= 4 && String.fromCharCode(bytes[0], bytes[1], bytes[2], bytes[3]) === "RIFF") {
+          return decodeToPage(CairnDecoder.decodeFrame(bytes));
+        }
+      } catch (e) {
+        show(errorText(e));
+        return;
+      }
+      audioCtx = audioCtx || new (window.AudioContext || window.webkitAudioContext)();
+      return audioCtx.decodeAudioData(buf.slice(0)).then(function (abuf) {
+        return decodeToPage(CairnDecoder.decodeFrameSamples(int16FromFloat32(abuf.getChannelData(0)), abuf.sampleRate));
+      }).catch(function (e) {
+        show(errorText(e));
+      });
+    }).catch(function (e) {
+      show(errorText(e));
     });
   });
 
-  // transmit mode: play the loaded wav through the speaker
+  // transmit mode: play the loaded file through the speaker; the loop toggle
+  // sets BufferSource.loop (the wav carries its own stop tone, so looping
+  // replays the whole transmission)
   document.getElementById("transmit").addEventListener("click", function () {
-    if (!lastWav) { show("Load a WAV file first."); return; }
+    if (!lastWav) { show("Load an audio file first."); return; }
     audioCtx = audioCtx || new (window.AudioContext || window.webkitAudioContext)();
     audioCtx.decodeAudioData(lastWav.slice(0), function (buf) {
       var src = audioCtx.createBufferSource();
       src.buffer = buf;
+      src.loop = loopOn;
       src.connect(audioCtx.destination);
       src.start(0);
-      show("Transmitting " + Math.round(buf.duration) + "s of audio…");
+      show("Transmitting " + Math.round(buf.duration) + "s of audio" + (loopOn ? " (looping)…" : "…"));
     }, function () { show("Audio decode failed."); });
+  });
+
+  document.getElementById("loop").addEventListener("click", function () {
+    loopOn = !loopOn;
+    this.textContent = loopOn ? "loop: on" : "loop: off";
   });
 
   // mic path (best-effort): stream samples through the same demodulator

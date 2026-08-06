@@ -400,14 +400,13 @@
   // stream for the sync word; for each sync candidate (in score order, max 8)
   // learn the tone scalars, demodulate with drift tracking, and decode the
   // region. Returns the recovered compressed payload and decode stats.
-  // Find the frame on its own: try each link profile, scanning the sample
-  // stream for the sync word; for each sync candidate (in score order, max 8)
-  // learn the tone scalars, demodulate with drift tracking, and decode the
-  // region. `profilesOverride` replaces the shipped LINK_PROFILES (used by the
-  // channel simulator's constant sweep — the swept entries must use the same
-  // profile-byte indices, i.e. an entry named "radio" decodes a radio frame).
-  function decodeFrame(wavBytes, profilesOverride) {
-    const { sr, samples } = parseWav(wavBytes);
+  // `samples` is mono Int16 at any capture rate; `sr` is that rate (the spb is
+  // derived from it, so decode.html can feed decodeAudioData output at the
+  // file's native rate). `profilesOverride` replaces the shipped LINK_PROFILES
+  // (used by the channel simulator's constant sweep — the swept entries must
+  // use the same profile-byte indices, i.e. an entry named "radio" decodes a
+  // radio frame).
+  function decodeFrameSamples(samples, sr, profilesOverride) {
     const profiles = profilesOverride || LINK_PROFILES;
     let lastErr = null;
     for (const profile of profiles) {
@@ -428,6 +427,11 @@
     }
     if (lastErr) throw lastErr;
     throw new SyncNotFound("no frame found");
+  }
+
+  function decodeFrame(wavBytes, profilesOverride) {
+    const { sr, samples } = parseWav(wavBytes);
+    return decodeFrameSamples(samples, sr, profilesOverride);
   }
 
   // Reed-Solomon (255,223) codec (v2 audio relay). Parameterization matches
@@ -643,7 +647,7 @@
   const rs = { encode: rsEncode, decode: rsDecode, deinterleave, gfMul, N: RS_N, K: RS_K, NSYM: RS_NSYM };
 
   const api = {
-    decodeWavBytes, crc32, demodIQ, gunzipSync, decodeFrame,
+    decodeWavBytes, crc32, demodIQ, gunzipSync, decodeFrame, decodeFrameSamples,
     errors: { WavParseError, UnsupportedFormat, SyncNotFound, RSCorrectionFailed, CRCError },
     rs,
   };
