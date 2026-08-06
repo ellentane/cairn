@@ -42,7 +42,8 @@ test.use({
 
 test("relay: mic path captures full-level audio through the real WebAudio graph and runs the decode pipeline", async ({ page }) => {
   test.setTimeout(60000);
-  buildRelayAudio();
+  const { seconds } = buildRelayAudio();
+  const strict = process.env.RELAY_STRICT === "1";
   await page.addInitScript(async ({ wavUrl }) => {
     const ctx = new (window.AudioContext || window.webkitAudioContext)();
     const resp = await fetch(wavUrl);
@@ -53,24 +54,30 @@ test("relay: mic path captures full-level audio through the real WebAudio graph 
     const dest = ctx.createMediaStreamDestination();
     src.connect(dest);
     src.start();
-    // expose a capture-quality hook the test can read: the tpl's mic path
-    // accumulates chunks; expose the accumulated sample count + RMS via a
-    // window hook installed before the page script runs
     Object.defineProperty(navigator, "mediaDevices", {
       value: { getUserMedia: async () => dest.stream },
       configurable: true,
     });
   }, { wavUrl: "http://127.0.0.1:8931/relay.wav" });
 
-  // tap into the tpl's mic accumulation: after the page loads, wrap the
-  // AudioWorkletNode message path is internal — instead assert capture via the
-  // recording status ticker and the absence of page errors, then verify the
-  // stop path runs the decode pipeline to a status result.
   const errors = [];
   page.on("pageerror", (e) => errors.push(e.message));
   await page.goto("/decode.html");
   await page.click("#mic");
   await expect(page.locator("#status")).toContainText("Listening");
+  if (strict) {
+    // Full-reconstruction assertion. Run with RELAY_STRICT=1 on a machine
+    // with a real audio stack — headless Chromium's MediaStream capture path
+    // corrupts the signal at the sample level here (measured; see the header
+    // comment), so this assertion is intentionally not part of the default
+    // CI run. It proves the complete speaker -> mic -> decode.html chain.
+    await page.waitForTimeout(Math.ceil(seconds * 1000) + 4000);
+    await page.click("#mic");
+    await expect(page.locator("#out")).toContainText("id=\"inc\"", { timeout: 60000 });
+    await expect(page.locator("#status")).toContainText("CRC verified");
+    expect(errors).toEqual([]);
+    return;
+  }
   // let the capture accumulate real audio for a few seconds
   await page.waitForTimeout(5000);
   await page.click("#mic");
