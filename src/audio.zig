@@ -24,7 +24,7 @@ pub const LinkProfile = struct {
 };
 pub const LINK_PROFILES = [_]LinkProfile{
     .{ .name = "clean", .tone_low = 1200, .tone_high = 2400, .samples_per_bit = 8 },
-    .{ .name = "radio", .tone_low = 1200, .tone_high = 2000, .samples_per_bit = 12 },
+    .{ .name = "radio", .tone_low = 1200, .tone_high = 2300, .samples_per_bit = 14 },
 };
 pub const SYNC_WORD: u32 = 0xD3A94E57;
 pub const PREAMBLE_BYTES: usize = 96;
@@ -626,8 +626,8 @@ test "link profile constants match tests/link_profiles.json" {
     try std.testing.expectEqual(@as(f64, 2400), LINK_PROFILES[0].tone_high);
     try std.testing.expectEqual(@as(u32, 8), LINK_PROFILES[0].samples_per_bit);
     try std.testing.expectEqual(@as(f64, 1200), LINK_PROFILES[1].tone_low);
-    try std.testing.expectEqual(@as(f64, 2000), LINK_PROFILES[1].tone_high);
-    try std.testing.expectEqual(@as(u32, 12), LINK_PROFILES[1].samples_per_bit);
+    try std.testing.expectEqual(@as(f64, 2300), LINK_PROFILES[1].tone_high);
+    try std.testing.expectEqual(@as(u32, 14), LINK_PROFILES[1].samples_per_bit);
     try std.testing.expectEqualStrings("clean", LINK_PROFILES[0].name);
     try std.testing.expectEqualStrings("radio", LINK_PROFILES[1].name);
 }

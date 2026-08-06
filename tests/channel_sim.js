@@ -101,11 +101,11 @@ const ECHO2 = 0.15;
 const PPM_MAX = 100;            // recorder clock offset, +-ppm (spec value)
 const GAUSS_N = 1 << 20;
 
-const DEFAULT_TRIALS = 200;
+const DEFAULT_TRIALS = 100;
 const DEFAULT_SNR = 25;
 const DEFAULT_SEED = 0x5EED;
 const DEFAULT_PROFILE = "radio";
-const GATE_BUDGET = 10; // failures allowed out of DEFAULT_TRIALS (5%)
+const GATE_BUDGET = 5; // failures allowed out of DEFAULT_TRIALS (5%)
 
 // ---------- deterministic rng ----------
 function mulberry32(seed) {

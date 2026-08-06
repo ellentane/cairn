@@ -93,16 +93,27 @@
     const normalize = cfg.normalize || null;
     const out = [];
     let t = t0;
+    // per-tone recursive oscillators (cos/sin recurrence) — the sync search
+    // demodulates the whole stream at several grids, so per-sample trig here
+    // would dominate the decode time
+    const cosD = tones.map((f) => Math.cos(2 * Math.PI * f / sr));
+    const sinD = tones.map((f) => Math.sin(2 * Math.PI * f / sr));
     while (t + spb <= samples.length + 1e-9) {
       const mags = tones.map(() => 0);
+      const c0 = tones.map((f) => Math.cos(2 * Math.PI * f * t / sr));
+      const s0 = tones.map((f) => Math.sin(2 * Math.PI * f * t / sr));
       for (let k = 0; k < tones.length; k++) {
         let I = 0, Q = 0;
-        const f = tones[k];
+        let c = c0[k], s = s0[k];
         const win = Math.min(spb, samples.length - t);
-        for (let s = 0; s < win; s++) {
-          const tt = Math.floor(t + s);
-          I += samples[tt] * Math.cos(2 * Math.PI * f * tt / sr);
-          Q += samples[tt] * Math.sin(2 * Math.PI * f * tt / sr);
+        for (let i = 0; i < win; i++) {
+          const tt = Math.floor(t + i);
+          const xv = samples[tt];
+          I += xv * c;
+          Q += xv * s;
+          const nc = c * cosD[k] - s * sinD[k];
+          s = s * cosD[k] + c * sinD[k];
+          c = nc;
         }
         const nk = normalize ? normalize[k] : 1;
         mags[k] = Math.hypot(I, Q) / (nk > 0 ? nk : 1);
@@ -131,7 +142,7 @@
   const ENCODER_RATE = 19200;
   const LINK_PROFILES = [
     { name: "clean", tone_low: 1200, tone_high: 2400, samples_per_bit: 8 },
-    { name: "radio", tone_low: 1200, tone_high: 2000, samples_per_bit: 12 },
+    { name: "radio", tone_low: 1200, tone_high: 2300, samples_per_bit: 14 },
   ];
   const SYNC_WORD = 0xD3A94E57;
   const SYNC_TOLERANCE = 8; // accept a sync match with up to 8 bit errors

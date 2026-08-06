@@ -41,7 +41,7 @@ const PINNED = {
 };
 const PROFILES = [
   { name: "clean", tone_low: 1200, tone_high: 2400, samples_per_bit: 8 },
-  { name: "radio", tone_low: 1200, tone_high: 2000, samples_per_bit: 12 },
+  { name: "radio", tone_low: 1200, tone_high: 2300, samples_per_bit: 14 },
 ];
 
 check("sync word 0xD3A94E57 === 3551088215", PINNED.sync_word === 3551088215);
@@ -144,7 +144,7 @@ for (const run of runs) {
   // Interleaving maps 17 consecutive region bytes of one codeword to 17 wire
   // bytes at stride 16, so every one lands in the same codeword.
   const overloadWav = Buffer.from(wav);
-  const SR = 19200, spb = 12; // radio profile encoder constants
+  const SR = 19200, spb = 14; // radio profile encoder constants
   const dataStart = SR * 1.5 + 96 * 8 * spb + 32 * spb; // go cue + preamble + sync
   function demodRegionBytes(buf, nBytes) {
     const bytes = [];
@@ -156,7 +156,7 @@ for (const run of runs) {
         for (let s = 0; s < spb; s++) {
           const tt = t0 + s, v = buf.readInt16LE(44 + tt * 2);
           mI += v * Math.cos(2 * Math.PI * 1200 * tt / SR); mQ += v * Math.sin(2 * Math.PI * 1200 * tt / SR);
-          sI += v * Math.cos(2 * Math.PI * 2000 * tt / SR); sQ += v * Math.sin(2 * Math.PI * 2000 * tt / SR);
+          sI += v * Math.cos(2 * Math.PI * 2300 * tt / SR); sQ += v * Math.sin(2 * Math.PI * 2300 * tt / SR);
         }
         byte = (byte << 1) | (Math.hypot(mI, mQ) >= Math.hypot(sI, sQ) ? 1 : 0);
       }
@@ -175,7 +175,7 @@ for (const run of runs) {
     const base = dataStart + (g * 48960 + b * 16 + k) * 8 * spb;
     for (let bit = 0; bit < 8; bit++) {
       const bitVal = (want >> (7 - bit)) & 1;
-      const toneHz = bitVal === 1 ? 1200 : 2000;
+      const toneHz = bitVal === 1 ? 1200 : 2300;
       const sample = base + bit * spb;
       for (let s = 0; s < spb; s++) {
         overloadWav.writeInt16LE(Math.round(12000 * Math.sin(2 * Math.PI * toneHz * s / SR)), 44 + (sample + s) * 2);
@@ -320,7 +320,7 @@ for (const run of runs) {
 // into the bit's sample window, so the demodulated bit provably flips
 // regardless of content.
 {
-  const SR = 19200, spb = 12; // radio profile encoder constants
+  const SR = 19200, spb = 14; // radio profile encoder constants
   const SYNC_WORD = 0xD3A94E57;
   const syncStart = SR * 1.5 + 96 * 8 * spb; // go cue + preamble
   const wav = encodeV2(payloads[0].data, "radio"); // small payload, fast decode
@@ -329,7 +329,7 @@ for (const run of runs) {
     const out = Buffer.from(buf);
     for (const b of bits) {
       const bitVal = (SYNC_WORD >> (31 - b)) & 1;
-      const toneHz = bitVal === 1 ? 2000 : 1200; // opposite of the transmitted tone
+      const toneHz = bitVal === 1 ? 2300 : 1200; // opposite of the transmitted tone
       const sample = syncStart + b * spb;
       for (let s = 0; s < spb; s++) {
         out.writeInt16LE(Math.round(12000 * Math.sin(2 * Math.PI * toneHz * s / SR)), 44 + (sample + s) * 2);

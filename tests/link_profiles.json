@@ -1,7 +1,7 @@
 {
   "profiles": [
     { "name": "clean", "tone_low": 1200, "tone_high": 2400, "samples_per_bit": 8 },
-    { "name": "radio", "tone_low": 1200, "tone_high": 2000, "samples_per_bit": 12 }
+    { "name": "radio", "tone_low": 1200, "tone_high": 2300, "samples_per_bit": 14 }
   ],
   "sync_word": 3551088215,
   "preamble_bytes": 96,
