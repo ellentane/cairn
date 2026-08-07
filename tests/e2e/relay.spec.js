@@ -85,7 +85,17 @@ test("relay: mic path captures full-level audio through the real WebAudio graph 
     // Firefox's is clean.
     await page.waitForTimeout(Math.ceil(seconds * 1000) + 3000);
     await page.click("#mic");
-    await expect(page.locator("#out")).toContainText("id=\"inc\"", { timeout: 60000 });
+    const decoded = page.locator("#out");
+    await decoded.waitFor({ state: "attached", timeout: 90000 });
+    const t = await decoded.textContent();
+    if (!t.includes("id=\"inc\"")) {
+      throw new Error(
+        "full reconstruction failed; status=" +
+          JSON.stringify(await page.locator("#status").textContent()) +
+          " micBtn=" + JSON.stringify(await page.locator("#mic").textContent()) +
+          " out=" + JSON.stringify(t.slice(0, 200))
+      );
+    }
     await expect(page.locator("#status")).toContainText("CRC verified");
     expect(errors).toEqual([]);
     return;
