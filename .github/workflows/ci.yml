@@ -21,6 +21,11 @@ jobs:
       - run: npm install
       - run: npx playwright install --with-deps chromium firefox
       - run: npx playwright test
+      - name: Start PulseAudio null sink (Firefox WebAudio clock)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends pulseaudio
+          pulseaudio --daemonize --exit-idle-time=-1 --load="module-null-sink sink_name=ci-null"
       - name: Full-reconstruction relay test in Firefox
         run: RELAY_STRICT=1 npx playwright test tests/e2e/relay.spec.js --project=firefox
 
