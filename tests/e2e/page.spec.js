@@ -13,6 +13,9 @@ function build(target, flags = "") {
 test("last box: the clock runs on your time", async ({ page }) => {
   build("example/index.md");
   await page.goto("/");
+  // the built page renders asynchronously (VM boot builds the DOM); wait for
+  // the element before asserting — parallel workers can delay the boot
+  await page.locator("#clock").waitFor({ state: "attached", timeout: 15000 });
   await expect(page.locator("#clock")).toHaveText("5:14");
   await page.click("#mug-btn");
   await expect(page.locator("#clock")).toHaveText("5:15");

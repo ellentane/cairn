@@ -6,4 +6,8 @@ module.exports = {
     port: 8931,
     reuseExistingServer: true,
   },
+  projects: [
+    { name: "chromium", use: { browserName: "chromium" } },
+    { name: "firefox", use: { browserName: "firefox" } },
+  ],
 };

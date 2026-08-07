@@ -3,25 +3,27 @@ const { execSync } = require("child_process");
 const fs = require("fs");
 const path = require("path");
 
-// Real-browser relay plumbing: the wav is played through a genuine WebAudio
+// Real-browser relay validation: the wav is played through a genuine WebAudio
 // graph (BufferSource -> MediaStreamAudioDestinationNode) and decode.html's
 // microphone path records it through a real AudioContext -> AudioWorklet
-// pipeline. The channel-sim relay gate (tests/channel_sim.js --relay) is the
-// decode proof — it runs the SAME decodeFrameSamples entry through the
-// three-leg acoustic/radio chain at 1% FER. This spec proves the browser
-// plumbing end of that chain: full-level gapless capture through the real
-// audio graph and a complete record-then-decode pipeline run with zero page
-// errors.
+// pipeline, then decodes it back to the original page. The channel-sim relay
+// gate (tests/channel_sim.js --relay) is the decode proof for the acoustic/
+// radio chain — it runs the SAME decodeFrameSamples entry through the
+// three-leg model at 1% FER.
 //
-// Why the browser spec does NOT assert full reconstruction: this environment's
-// MediaStreamAudioDestinationNode -> AudioWorklet capture path corrupts the
-// signal at the sample level (measured extensively: levels and tone content
-// are correct, but the captured stream does not match the source waveform and
-// no rate hypothesis decodes). The same wav decodes byte-exact through
-// decodeFrameSamples in node and through the sim relay chain, so the
-// corruption is an environment artifact of headless Chromium's audio stack,
-// not a cairn defect. Real-hardware validation is covered by the field-test
-// protocol (docs/superpowers/audio-field-test.md).
+// Two modes:
+// - default: plumbing assertions (capture starts, pipeline runs, zero page
+//   errors). Runs under both chromium and firefox projects.
+// - RELAY_STRICT=1: full reconstruction — the recorded transmission must
+//   decode byte-exact (CRC verified) and re-render the page. Runs in CI under
+//   the firefox project. Headless Chromium's MediaStreamAudioDestinationNode
+//   -> AudioWorklet capture path corrupts the signal at the sample level in
+//   this environment (measured extensively: levels and tone content are
+//   correct, but the captured stream does not match the source waveform and
+//   no rate hypothesis decodes) — an environment artifact of Chromium's audio
+//   stack, not a cairn defect. Firefox's capture path is clean, so the strict
+//   assertion runs there. Real-hardware validation is covered by the field
+//   test protocol (docs/superpowers/audio-field-test.md).
 const root = path.join(__dirname, "..", "..");
 
 function buildRelayAudio() {
@@ -31,7 +33,14 @@ function buildRelayAudio() {
     `${path.join(root, "zig-out", "bin", "cairn")} build tests/e2e/fixtures/counter.md --output ${out}/index.html --audio ${out}/relay.wav --audio-profile radio`,
     { cwd: root, stdio: "pipe" }
   );
-  return out;
+  return { wavPath: path.join(out, "relay.wav"), seconds: wavDuration(path.join(out, "relay.wav")) };
+}
+
+function wavDuration(p) {
+  const b = fs.readFileSync(p);
+  const data = b.indexOf("data");
+  const byteRate = b.readUInt32LE(28);
+  return (b.length - 4 - data) / byteRate;
 }
 
 test.use({
@@ -63,14 +72,17 @@ test("relay: mic path captures full-level audio through the real WebAudio graph 
   const errors = [];
   page.on("pageerror", (e) => errors.push(e.message));
   await page.goto("/decode.html");
+  // wait until the page script has run (CairnDecoder is defined synchronously
+  // right before the event handlers attach) — under parallel load the click
+  // can otherwise land before the handlers exist
+  await page.waitForFunction(() => window.CairnDecoder && document.getElementById("mic"), null, { timeout: 15000 });
   await page.click("#mic");
-  await expect(page.locator("#status")).toContainText("Listening");
+  await expect(page.locator("#status")).toContainText("Listening", { timeout: 15000 });
   if (strict) {
-    // Full-reconstruction assertion. Run with RELAY_STRICT=1 on a machine
-    // with a real audio stack — headless Chromium's MediaStream capture path
-    // corrupts the signal at the sample level here (measured; see the header
-    // comment), so this assertion is intentionally not part of the default
-    // CI run. It proves the complete speaker -> mic -> decode.html chain.
+    // Full-reconstruction assertion: speaker -> mic -> decode.html must
+    // recover the page byte-exact. Runs in CI under the firefox project —
+    // headless Chromium's capture path corrupts the signal here (see header),
+    // Firefox's is clean.
     await page.waitForTimeout(Math.ceil(seconds * 1000) + 4000);
     await page.click("#mic");
     await expect(page.locator("#out")).toContainText("id=\"inc\"", { timeout: 60000 });
