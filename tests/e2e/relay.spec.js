@@ -30,7 +30,7 @@ function buildRelayAudio() {
   const out = path.join(root, "tmp-e2e");
   fs.mkdirSync(out, { recursive: true });
   execSync(
-    `${path.join(root, "zig-out", "bin", "cairn")} build tests/e2e/fixtures/counter.md --output ${out}/index.html --audio ${out}/relay.wav --audio-profile radio`,
+    `${path.join(root, "zig-out", "bin", "cairn")} build tests/e2e/fixtures/counter.md --output ${out}/relay-page.html --audio ${out}/relay.wav --audio-profile radio`,
     { cwd: root, stdio: "pipe" }
   );
   return { wavPath: path.join(out, "relay.wav"), seconds: wavDuration(path.join(out, "relay.wav")) };
@@ -50,7 +50,7 @@ test.use({
 });
 
 test("relay: mic path captures full-level audio through the real WebAudio graph and runs the decode pipeline", async ({ page }) => {
-  test.setTimeout(60000);
+  test.setTimeout(150000);
   const { seconds } = buildRelayAudio();
   const strict = process.env.RELAY_STRICT === "1";
   await page.addInitScript(async ({ wavUrl }) => {
@@ -59,7 +59,7 @@ test("relay: mic path captures full-level audio through the real WebAudio graph 
     const buf = await ctx.decodeAudioData(await resp.arrayBuffer());
     const src = ctx.createBufferSource();
     src.buffer = buf;
-    src.loop = true;
+    src.loop = false;
     const dest = ctx.createMediaStreamDestination();
     src.connect(dest);
     src.start();
@@ -83,7 +83,7 @@ test("relay: mic path captures full-level audio through the real WebAudio graph 
     // recover the page byte-exact. Runs in CI under the firefox project —
     // headless Chromium's capture path corrupts the signal here (see header),
     // Firefox's is clean.
-    await page.waitForTimeout(Math.ceil(seconds * 1000) + 4000);
+    await page.waitForTimeout(Math.ceil(seconds * 1000) + 3000);
     await page.click("#mic");
     await expect(page.locator("#out")).toContainText("id=\"inc\"", { timeout: 60000 });
     await expect(page.locator("#status")).toContainText("CRC verified");

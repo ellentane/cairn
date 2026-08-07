@@ -7,7 +7,7 @@ function buildAudio() {
   const out = path.join(__dirname, "..", "..", "tmp-e2e");
   fs.mkdirSync(out, { recursive: true });
   execSync(
-    `${path.join(__dirname, "..", "..", "zig-out", "bin", "cairn")} build example/index.md --output ${out}/index.html --audio ${out}/relay.wav`,
+    `${path.join(__dirname, "..", "..", "zig-out", "bin", "cairn")} build example/index.md --output ${out}/audio-page.html --audio ${out}/audio-relay.wav`,
     { cwd: path.join(__dirname, "..", ".."), stdio: "pipe" }
   );
   return out;

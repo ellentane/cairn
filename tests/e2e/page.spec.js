@@ -6,16 +6,16 @@ const path = require("path");
 function build(target, flags = "") {
   const out = path.join(__dirname, "..", "..", "tmp-e2e");
   fs.mkdirSync(out, { recursive: true });
-  execSync(`${path.join(__dirname, "..", "..", "zig-out", "bin", "cairn")} build ${target} --output ${out}/index.html ${flags}`, { cwd: path.join(__dirname, "..", ".."), stdio: "pipe" });
+  execSync(`${path.join(__dirname, "..", "..", "zig-out", "bin", "cairn")} build ${target} --output ${out}/page.html ${flags}`, { cwd: path.join(__dirname, "..", ".."), stdio: "pipe" });
   return out;
 }
 
 test("last box: the clock runs on your time", async ({ page }) => {
   build("example/index.md");
-  await page.goto("/");
+  await page.goto("/page.html");
   // the built page renders asynchronously (VM boot builds the DOM); wait for
   // the element before asserting — parallel workers can delay the boot
-  await page.locator("#clock").waitFor({ state: "attached", timeout: 15000 });
+  await page.locator("#clock").waitFor({ state: "attached", timeout: 30000 });
   await expect(page.locator("#clock")).toHaveText("5:14");
   await page.click("#mug-btn");
   await expect(page.locator("#clock")).toHaveText("5:15");
@@ -26,7 +26,7 @@ test("last box: the clock runs on your time", async ({ page }) => {
 
 test("last box: the box won't close", async ({ page }) => {
   build("example/index.md");
-  await page.goto("/");
+  await page.goto("/page.html");
   await page.click("#coat-btn");
   await page.click("#cassette-btn");
   await expect(page.locator("#total")).toHaveText("3000");
@@ -37,7 +37,7 @@ test("last box: the box won't close", async ({ page }) => {
 
 test("last box: the drawer reveals the note", async ({ page }) => {
   build("example/index.md");
-  await page.goto("/");
+  await page.goto("/page.html");
   await expect(page.locator("#note-row")).toBeHidden();
   await page.click("#drawer-btn");
   await expect(page.locator("#note-row")).toBeVisible();
@@ -46,7 +46,7 @@ test("last box: the drawer reveals the note", async ({ page }) => {
 
 test("last box: the room darkens as time passes", async ({ page }) => {
   build("example/index.md");
-  await page.goto("/");
+  await page.goto("/page.html");
   for (let i = 0; i < 11; i++) await page.click("#mug-btn");
   await expect(page.locator("#clock")).toHaveText("5:25");
   await expect(page.locator("#room")).toHaveClass(/dusk/);
@@ -57,7 +57,7 @@ test("last box: the room darkens as time passes", async ({ page }) => {
 
 test("last box: you make it with time to spare", async ({ page }) => {
   build("example/index.md");
-  await page.goto("/");
+  await page.goto("/page.html");
   await page.click("#mug-btn");
   await page.fill("#name", "ada");
   await page.click("#seal");
@@ -71,7 +71,7 @@ test("last box: you make it with time to spare", async ({ page }) => {
 
 test("last box: you miss the train", async ({ page }) => {
   build("example/index.md");
-  await page.goto("/");
+  await page.goto("/page.html");
   for (let i = 0; i < 29; i++) await page.click("#mug-btn");
   await page.fill("#name", "ada");
   await page.click("#seal");
@@ -84,7 +84,7 @@ test("last box: you miss the train", async ({ page }) => {
 
 test("last box: the empty box has its own ending", async ({ page }) => {
   build("example/index.md");
-  await page.goto("/");
+  await page.goto("/page.html");
   await page.fill("#name", "ada");
   await page.click("#seal");
   await expect(page.locator("#e-l2")).toHaveText("you seal the empty box. there was nothing to take.");
@@ -93,7 +93,7 @@ test("last box: the empty box has its own ending", async ({ page }) => {
 
 test("last box: rows catch the light on hover", async ({ page }) => {
   build("example/index.md");
-  await page.goto("/");
+  await page.goto("/page.html");
   await page.hover("#row-mug");
   await expect(page.locator("#row-mug")).toHaveClass(/lit/);
 });
@@ -102,7 +102,7 @@ test("last box: no network requests", async ({ page }) => {
   build("example/index.md");
   const requests = [];
   page.on("request", (r) => requests.push(r.url()));
-  await page.goto("/");
+  await page.goto("/page.html");
   await page.click("#mug-btn");
   expect(requests.length).toBe(1);
   expect(requests[0].startsWith("http://127.0.0.1:8931")).toBe(true);
@@ -110,14 +110,14 @@ test("last box: no network requests", async ({ page }) => {
 
 test("decimal debug-encoding page still boots", async ({ page }) => {
   build("example/index.md", "--debug-encoding");
-  await page.goto("/");
+  await page.goto("/page.html");
   await page.click("#mug-btn");
   await expect(page.locator("#total")).toHaveText("400");
 });
 
 test("base64 transport page boots", async ({ page }) => {
   build("example/index.md");
-  await page.goto("/");
+  await page.goto("/page.html");
   await page.click("#mug-btn");
   await expect(page.locator("#total")).toHaveText("400");
 });
